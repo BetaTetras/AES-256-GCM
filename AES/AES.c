@@ -81,6 +81,8 @@ void AES_Decrypt_state(uint8_t state[4][4], uint8_t cle[32]);
 
 int ByteTranscription(char* path,int *NbState,uint8_t (**dest)[4][4]);
 
+void StringToKeyConverter(const char* str,uint8_t (*key)[32]);
+
 int AES_Encrypt_File(char* path,uint8_t key[32]);
 int AES_Decrypt_File(char* path,uint8_t key[32]);
 
@@ -526,4 +528,34 @@ int AES_Decrypt_File(char* path,uint8_t key[32]){
     fclose(file);
     free(b_file);
     return 0;
+}
+
+//////////////////////////////////////////////////////////
+
+// Génére une clé sous uint8_t depuis une string de 0 a +inf char
+void StringToKeyConverter(const char* str,uint8_t (*key)[32]){
+    int len = strlen(str);
+    char* cpyStr = (char*)calloc(len+1,sizeof(char));
+    strcpy(cpyStr,str);
+    cpyStr[len] = '\0';
+
+    for(int i=0;i<32;i++){
+        (*key)[i] = 0x00;
+    }
+
+    for(int i=0;i<len;i++){
+        (*key)[i % 32] = (uint8_t)cpyStr[i] ^ (*key)[i % 32];
+    }
+
+    for(int i=0;i<10;i++){
+        for(int y=0;y<32;y++){
+            if(y==0){
+                (*key)[y] = SBOX[(*key)[y]] ^ (*key)[31];
+            }else{
+                (*key)[y] = SBOX[(*key)[y]] ^ (*key)[(y-1)%32];
+            }
+        }
+    }
+
+    free(cpyStr);
 }
