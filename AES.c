@@ -88,6 +88,24 @@ void GenerateKey(word finaleW[60],word initialW[8]);
 void AES_Encrypt_state(uint8_t state[4][4], uint8_t cle[32]);
 void AES_Decrypt_state(uint8_t state[4][4], uint8_t cle[32]);
 
+/* STATE (Etat)
+ * Le state est la matrice de donnée de 4*4 octet qui contien
+ * les 16 bytes de donnée a chiffrée.
+ * Exemple :
+ * 0x00 0x04 0x08 0x0c
+ * 0x01 0x05 0x09 0x0d
+ * 0x02 0x06 0x0a 0x0e
+ * 0x03 0x07 0x0b 0x0f
+*/
+
+/* WORD (Mot)
+ * Un Word (Mot) contien 4 octet. C'est l'unitée utilisée de base
+ * de la clé AED, Il joue le rôle segment de cette même clé.
+ * Grace a cette unitée on peut en générée des suplémentaire
+ * Exemple :
+ * 0x01 0x02 0x03 0x04 = W[0]
+*/
+
 int main(){
     uint8_t cle[32] = MA_CLE;
 
@@ -127,7 +145,7 @@ int main(){
 
 //////////////////////////////////////////////////////////
 
-// Fonction debuf avec que des 0xff
+// Générée un state debug pour annalyse et verification
 void initStateDebugAlpha(uint8_t state[4][4]){
     for(int i=0;i<4;i++){
         for(int y=0;y<4;y++){
@@ -136,7 +154,7 @@ void initStateDebugAlpha(uint8_t state[4][4]){
     }
 }
 
-// Fonction debug avec des nombre comprensible différent
+// Générée un state debug pour annalyse et verification avec des valeur logique
 void initStateDebugBeta(uint8_t state[4][4]){
     int index = 0;
     for(int i=0;i<4;i++){
@@ -159,10 +177,12 @@ void printState(uint8_t state[4][4]){
     }
 }
 
+// Affiche un mot
 void printWord(word w, int index){
     printf("W[%02d] = %02x %02x %02x %02x\n", index, w[0], w[1], w[2], w[3]);
 }
 
+// Debug de clef 
 void debugGenerateKey(word finaleW[60]){
     printf("=== DEBUG GenerateKey ===\n");
     for(int i=0;i<60;i++){
@@ -172,6 +192,7 @@ void debugGenerateKey(word finaleW[60]){
 
 //////////////////////////////////////////////////////////
 
+// Effectue une addition XOR entre l'état et une clé de ronde
 void addRoundKey(uint8_t state[4][4], word rondKey[4]){
     for(int i=0;i<4;i++){      // i = ligne
         for(int y=0;y<4;y++){  // y = colonne
@@ -182,7 +203,7 @@ void addRoundKey(uint8_t state[4][4], word rondKey[4]){
 
 //////////////////////////////////////////////////////////
 
-// Affectée du bruit avec la SBOX
+// Remplace chaque octet par sa valeur dans la S-BOX (table de substitution)
 void SubBytes(uint8_t state[4][4]){
     for(int i=0;i<4;i++){
         for(int y=0;y<4;y++){
@@ -192,13 +213,16 @@ void SubBytes(uint8_t state[4][4]){
 }
 
 void InvSubBytes(uint8_t state[4][4]) {
-    for (int i = 0; i < 4; i++)
-        for (int y = 0; y < 4; y++)
+    for (int i = 0; i < 4; i++){
+        for (int y = 0; y < 4; y++){
             state[i][y] = INV_SBOX[state[i][y]];
+        }
+    }
 }
 
 //////////////////////////////////////////////////////////
 
+// Décale les éléments de chaque ligne vers la gauche (rotation).
 void ShiftRows(uint8_t state[4][4]){
     for(int i=0;i<4;i++){   
         push(state[i],i);
@@ -210,8 +234,7 @@ void InvShiftRows(uint8_t state[4][4]) {
         pop(state[i], i);
 }
 
-
-
+// Effectue x rotations circulaires vers la gauche sur une ligne.
 void push(uint8_t ligne[4],int x){
     uint8_t buffeur;
     for(int i=0;i<x;i++){
@@ -223,6 +246,7 @@ void push(uint8_t ligne[4],int x){
     }
 }
 
+// Effectue x rotations circulaires vers la droite sur une ligne.
 void pop(uint8_t ligne[4], int x) {
     uint8_t buffeur;
     for (int i = 0; i < x; i++) {
@@ -234,6 +258,7 @@ void pop(uint8_t ligne[4], int x) {
 }
 //////////////////////////////////////////////////////////
 
+// Multiplie par 2 dans le corps de Galois GF(2^8).
 uint8_t xtime(uint8_t octet){
     if(octet & 0x80){
         return (octet << 1) ^ 0x1b;
@@ -242,8 +267,8 @@ uint8_t xtime(uint8_t octet){
     }
 }
 
+// Multiplie deux octets dans GF(2^8) en utilisant des xtime répétées.
 uint8_t mul(uint8_t a, uint8_t b) {
-    // Multiplication dans GF(2^8) par additions de xtime
     uint8_t result = 0;
     for (int i = 0; i < 8; i++) {
         if (b & 1) result ^= a;
@@ -253,6 +278,7 @@ uint8_t mul(uint8_t a, uint8_t b) {
     return result;
 }
 
+// Effectue une transformation linéaire sur chaque colonne de la matrice d'état. 
 void MixColumns(uint8_t state[4][4]){
     for (int i = 0; i < 4; i++){
         uint8_t a0 = state[0][i];
@@ -283,12 +309,14 @@ void InvMixColumns(uint8_t state[4][4]) {
 
 //////////////////////////////////////////////////////////
 
+// Remplace chaque octet d'un mot par son équivalent dans la S-BOX.
 void SubWord(uint8_t ligne[4]){
     for(int i=0;i<4;i++){
         ligne[i] = SBOX[ligne[i]];
     }
 } 
 
+// Effectue une rotation circulaire d'un mot vers la gauche.
 void RotWord(uint8_t ligne[4]){
     push(ligne,1);
 }
