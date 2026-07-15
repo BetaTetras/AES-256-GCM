@@ -79,7 +79,7 @@ void GenerateKey(word finaleW[60],word initialW[8]);
 void AES_Encrypt_state(uint8_t state[4][4], uint8_t cle[32]);
 void AES_Decrypt_state(uint8_t state[4][4], uint8_t cle[32]);
 
-void ByteTranscription(char* path,int *NbState,uint8_t (**dest)[4][4]);
+int ByteTranscription(char* path,int *NbState,uint8_t (**dest)[4][4]);
 
 int AES_Encrypt_File(char* path,uint8_t key[32]);
 int AES_Decrypt_File(char* path,uint8_t key[32]);
@@ -391,8 +391,9 @@ int ByteTranscription(char* path,int *NbState,uint8_t (**dest)[4][4]){
         return 1;
     }
 
+    // Les octet en trop si fichier non multiple de 16
     // On détermine le nombre de state
-    if(size%16==0){
+    if(size % 16 == 0){
         *NbState = size / 16;
     }else{
         *NbState = (size / 16) + 1;
@@ -403,12 +404,9 @@ int ByteTranscription(char* path,int *NbState,uint8_t (**dest)[4][4]){
 
     for(int state=0;state<*NbState;state++){
         uint8_t buffer[16] = {0};
-
-        // Lecture de 16 octet
         fread(buffer, 1, 16, file);
 
         int index = 0;
-
         for(int colonne = 0; colonne < 4; colonne++){
             for(int ligne = 0; ligne < 4; ligne++){
                 (*dest)[state][ligne][colonne] = buffer[index++];
@@ -425,12 +423,48 @@ int AES_Encrypt_File(char* path,uint8_t key[32]){
     uint8_t (*b_file)[4][4] = NULL;
     int NbState;
 
+    // Transcription du fichier en pointeur de liste de state
     if(ByteTranscription(path,&NbState,&b_file) == 1){
         return 1;
     }
 
+    // Ouverture du fichier pour check la taille du fichier (nombre d'octet)
+    FILE* fcheck = fopen(path,"rb");
+    if(!fcheck){
+        free(b_file);
+        return 1;
+    }
+    fseek(fcheck, 0, SEEK_END);
+    long size = ftell(fcheck);
+    fclose(fcheck);
+
+    // On détermine si on a besoin de padding si la taille du fichier est un mutiple de 16 
+    int padding;
+    if(size % 16 == 0){
+        padding = 16;
+
+        // On ajoute un state de padding entier si c'est un multiple
+        b_file = realloc(b_file, (NbState + 1) * sizeof(uint8_t[4][4]));
+        for(int ligne=0; ligne<4; ligne++){
+            for(int colonne=0; colonne<4; colonne++){
+                b_file[NbState][ligne][colonne] = 16;
+            }
+        }
+        NbState++;
+    }else{
+        padding = 16 - (size % 16);
+
+        for(int i = size % 16; i < 16; i++){
+            int colonne = i / 4;
+            int ligne = i % 4;
+            b_file[NbState-1][ligne][colonne] = (uint8_t)padding;
+        }
+    }
+
+    // Ecriture du fichier encryptée 
     FILE* file = fopen(path,"wb");
     if(!file){
+        free(b_file);
         return 1;
     }
 
@@ -459,20 +493,32 @@ int AES_Decrypt_File(char* path,uint8_t key[32]){
         return 1;
     }
 
+    // On décrypte tout le fichier 
+    for(int i=0;i<NbState;i++){
+        AES_Decrypt_state(b_file[i], key);
+    }
+
+    // Le dernier state on le mes de cotée a cause du padding
+    // Rappel : Si NbState = 2 alors il y'a b_file[0] et b_file[1] et donc b_file[2] = OOM
+    uint8_t padding = b_file[NbState-1][3][3];
+    // Nombre d'Octet a écrire
+    long NombreOctet = (long)NbState * 16 - padding;
+
     FILE* file = fopen(path,"wb");
     if(!file){
+        free(b_file);
         return 1;
     }
 
-    uint8_t buffeur_state[4][4];
+    // On suis le nombre d'octet écrit pour le padding 
+    long indexOctet = 0;
     for(int i=0;i<NbState;i++){
-        memcpy(buffeur_state, b_file[i], sizeof(buffeur_state));
-
-        AES_Decrypt_state(buffeur_state,key);
-        
         for(int colonne = 0; colonne < 4; colonne++){
             for(int ligne = 0; ligne < 4; ligne++){
-                fwrite(&buffeur_state[ligne][colonne], 1, 1, file);
+                if(indexOctet < NombreOctet){
+                    fwrite(&b_file[i][ligne][colonne], 1, 1, file);
+                    indexOctet++;
+                }
             }
         }
     }
