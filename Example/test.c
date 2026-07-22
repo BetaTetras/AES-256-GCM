@@ -2,7 +2,7 @@
 #include <stdint.h> 
 #include <stdlib.h>
 #include <string.h>
-#include "./AES/AES.c"
+#include "../AES/AES.c"
 
 int main(){
 

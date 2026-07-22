@@ -532,6 +532,120 @@ int AES_Decrypt_File(char* path,uint8_t key[32]){
 
 //////////////////////////////////////////////////////////
 
+void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],int compteur){
+    uint8_t buffer[16];
+    memcpy(buffer, nonce, 12);
+
+    /* Pour transformée un nombre (compteur) en 4 octet pour la suite du code
+     * il faut extraire les 4 octet que constitue un int standare car un 
+     * int est en sois un uint32_t.
+     * 
+     * Pourquoi faire un décallage de x octete ( >> 24 ) :
+     *  Compteur original:
+     *   [0x12] [0x34] [0x56] [0x78]
+     *      ^
+     *   Cet octet, je veux l'extraire
+     *
+     *   Décale >> 24:
+     *   [0x12] [0x34] [0x56] [0x78]  →  [0x00] [0x00] [0x00] [0x12]
+     *                                                           ^
+     *                                               Maintenant c'est à la porte !
+     * Pourquoi & 0xff : 
+     * Rappelle : & = et , 0xff = 255 = 11111111
+     *  Masque & 0xff:
+     *   [0x00] [0x00] [0x00] [0x12]  →  [0x12]
+     *                                      ^
+     *                                  Je gardes juste ça
+     *
+    */
+    buffer[12] = ((uint32_t) compteur >> 24) & 0xff;
+    buffer[13] = ((uint32_t) compteur >> 16) & 0xff;
+    buffer[14] = ((uint32_t) compteur >> 8) & 0xff;
+    buffer[15] = ((uint32_t) compteur >> 0) & 0xff;
+
+    int index = 0;
+    for(int colonne = 0; colonne < 4; colonne++){
+        for(int ligne = 0; ligne < 4; ligne++){
+            state[ligne][colonne] = buffer[index++];
+        }
+    }
+}
+
+void gf129_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]){
+    memset(res,0x00,16);
+    for(int i = 0; i < 128;i++){
+        // Pour extraire le bit numéro i du tableau b de 16 octets.
+        int bit = (b[i / 8] >> i % 8) & 1;
+        if(bit){
+            for(int j=0; j<16;j++){
+                res[j] ^= a[j];
+            }
+        }
+    }
+}
+
+void GHASH(uint8_t tag[16],const uint8_t (*Stats)[4][4], const int NbState,const uint8_t key[32]){
+    // En gros dans cette partie on crée une state remplis de 0 puis on
+    // la chiffre avec la cle afin de générée une suite linaire (donc
+    // pas de [4]x[4] mais direct 16) de cette state
+    uint8_t bufferState[4][4];
+    memset(bufferState,0,16);
+    AES_Encrypt_state(&bufferState,key);
+
+    uint8_t zeroEncrypted[16];
+    memcpy(zeroEncrypted,(uint8_t*)bufferState,16);
+
+
+}
+
+int AES_GCM_Encrypt_File(char* path,uint8_t key[32]){
+    FILE *f = fopen("/dev/urandom", "rb");
+    if(f == NULL){
+        return 1;
+    }
+
+    uint8_t nonce[12];
+    if(fread(nonce, sizeof(uint8_t), 12, f)!= 12){
+        fclose(f);
+        return 1;
+    }
+
+    // b_file = liste de state du fichier a chiffrée
+    // NbState = Nombre de state de se fichiée
+    uint8_t (*b_file)[4][4] = NULL;
+    int NbState;
+    if(ByteTranscription(path,&NbState,&b_file) == 1){
+        return 1;
+    }
+
+    FILE* file = fopen(path,"wb");
+    if(file == NULL){
+        free(b_file);
+        return 1;
+    }   
+
+    fwrite(nonce,1,12,file);
+    for(int compteur=0;compteur<NbState;compteur++){
+        uint8_t CompteurBlockState[4][4];
+        ConterBlockGenerator(&CompteurBlockState,nonce,compteur);
+        AES_Encrypt_state(CompteurBlockState,key);
+
+        for(int ligne = 0; ligne < 4; ligne++){
+            for(int colonne = 0; colonne < 4; colonne++){
+                uint8_t octet = b_file[compteur][ligne][colonne] ^ CompteurBlockState[ligne][colonne];
+                fwrite(&octet, 1, 1, file);
+            }
+        }
+    }
+
+    fclose(f);
+    fclose(file);
+    free(b_file);
+
+    return 0;
+}
+//////////////////////////////////////////////////////////
+
 // Génére une clé sous uint8_t depuis une string de 0 a +inf char
 void StringToKeyConverter(const char* str,uint8_t (*key)[32]){
     int len = strlen(str);
