@@ -571,16 +571,56 @@ void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],int compteur){
     }
 }
 
-void gf129_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]){
+
+
+void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]){
+    // On def res a 0 sur ses 16 octet
     memset(res,0x00,16);
+    // On crée un copy par ce que a est une const
+    uint8_t a_CPY[16];
+    // On copy a dans a_CPY
+    memcpy(a_CPY, a, 16);
+
+    // Sur chaque bit (16*8 = 128)
     for(int i = 0; i < 128;i++){
         // Pour extraire le bit numéro i du tableau b de 16 octets.
-        int bit = (b[i / 8] >> i % 8) & 1;
+        int bit = (b[i / 8] >> (7 - (i % 8))) & 1;
         if(bit){
             for(int j=0; j<16;j++){
-                res[j] ^= a[j];
+                res[j] ^= a_CPY[j];
             }
         }
+
+        // Most Significant Bit 
+        uint8_t msb = (a_CPY[0] >> 7) & 1;
+
+
+        /* En gros dans la suite de mon code on décale d'un bit vers la GAUCHE
+         * sur TOUT les octete confondu :
+         *   Octet5    Octet4   Octet3    Octet2    Octet1
+         * [10000000][10000000][00001100][00000000][00000010]
+         * [00000001][00000000][00011000][00000000][00000101]
+        */
+        int extra = 0;
+        uint8_t buffer;
+        int index = 15;
+        for(int j=0;j<16;j++){
+            buffer = a_CPY[index];
+            a_CPY[index] = a_CPY[index] << 1;
+            if(extra){
+                a_CPY[index] = a_CPY[index] | 0x01;
+            }
+            extra = 0;
+            extra =  buffer >> 7;
+            index --;
+        }
+        if(extra == 1){
+            a_CPY[15] = a_CPY[15] | 0x01;
+        }
+        if(msb == 1){
+            a_CPY[15] ^= 0x87;
+        }
+    
     }
 }
 
@@ -595,21 +635,38 @@ void GHASH(uint8_t tag[16],const uint8_t (*Stats)[4][4], const int NbState,const
     uint8_t zeroEncrypted[16];
     memcpy(zeroEncrypted,(uint8_t*)bufferState,16);
 
+    uint8_t accumulateur[16] = {0x00};
+    
+    for(int i=0;i<NbState;i++){
+        int index = 0;
+        for(int colonne = 0; colonne < 4; colonne++){
+            for(int ligne = 0; ligne < 4; ligne++){
+                accumulateur[index] ^= Stats[i][ligne][colonne];
+                index ++;
+            }
+        }
 
+        uint8_t temp[16];
+        gf128_multiply(temp,accumulateur,zeroEncrypted);
+        memcpy(accumulateur,temp,16);
+    }
+    memcpy(tag, accumulateur, 16);
 }
 
 int AES_GCM_Encrypt_File(char* path,uint8_t key[32]){
+    // GENERATION DE LA NONCE
     FILE *f = fopen("/dev/urandom", "rb");
     if(f == NULL){
         return 1;
     }
-
     uint8_t nonce[12];
     if(fread(nonce, sizeof(uint8_t), 12, f)!= 12){
         fclose(f);
         return 1;
     }
+    fclose(f);
 
+    // RECUPERATION DES STATS
     // b_file = liste de state du fichier a chiffrée
     // NbState = Nombre de state de se fichiée
     uint8_t (*b_file)[4][4] = NULL;
@@ -618,13 +675,8 @@ int AES_GCM_Encrypt_File(char* path,uint8_t key[32]){
         return 1;
     }
 
-    FILE* file = fopen(path,"wb");
-    if(file == NULL){
-        free(b_file);
-        return 1;
-    }   
-
-    fwrite(nonce,1,12,file);
+    // CHIFFREMENT DES DONNEES
+    uint8_t (*ciphertext)[4][4] = calloc(NbState,sizeof(uint8_t[4][4]));
     for(int compteur=0;compteur<NbState;compteur++){
         uint8_t CompteurBlockState[4][4];
         ConterBlockGenerator(&CompteurBlockState,nonce,compteur);
@@ -632,15 +684,40 @@ int AES_GCM_Encrypt_File(char* path,uint8_t key[32]){
 
         for(int ligne = 0; ligne < 4; ligne++){
             for(int colonne = 0; colonne < 4; colonne++){
-                uint8_t octet = b_file[compteur][ligne][colonne] ^ CompteurBlockState[ligne][colonne];
-                fwrite(&octet, 1, 1, file);
+                ciphertext[compteur][ligne][colonne] = b_file[compteur][ligne][colonne] ^ CompteurBlockState[ligne][colonne];
             }
         }
     }
 
-    fclose(f);
-    fclose(file);
+    // GENERATION DU TAG
+    uint8_t tag[16];
+    GHASH(tag,ciphertext,NbState,key);
+
+
+    FILE* file = fopen(path,"wb");
+    if(file == NULL){
+        free(b_file);
+        return 1;
+    }   
+    
+    // ECRITURE DE LA NONCE
+    fwrite(nonce,1,12,file);
+
+    // ECRITURE DU CIPHERTEXT
+    for(int i=0;i<NbState;i++){
+        for(int colonne = 0; colonne < 4; colonne++){
+            for(int ligne = 0; ligne < 4; ligne++){
+                fwrite(&ciphertext[i][ligne][colonne],1,1,file);
+            }
+        }
+    }
+
+    // ECRITURE DU TAG
+    fwrite(tag, 1, 16, file);
+
     free(b_file);
+    fclose(file);
+    free(ciphertext);
 
     return 0;
 }
