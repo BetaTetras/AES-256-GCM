@@ -577,6 +577,7 @@ void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]){
     }
 }
 
+// A DEGAGER
 void GHASH(uint8_t tag[16],const uint8_t (*Stats)[4][4], const int NbState,const uint8_t key[32]){
     // En gros dans cette partie on crée une state remplis de 0 puis on
     // la chiffre avec la cle afin de générée une suite linaire (donc
@@ -619,8 +620,9 @@ int AES_GCM_Encrypt_File(char* path,uint8_t key[32]){
 
     // LECTURE DU FICHIER BRUT (sans padding)
     FILE* file_in = fopen(path, "rb");
-    if(!file_in) return 1;
-    
+    if(!file_in){
+        return 1;
+    }
     fseek(file_in, 0, SEEK_END);
     long filesize = ftell(file_in);
     rewind(file_in);
@@ -628,163 +630,159 @@ int AES_GCM_Encrypt_File(char* path,uint8_t key[32]){
     // Calculer le nombre de blocs avec padding
     int NbState = (filesize + 16) / 16;  // Arrondir vers le haut
     uint8_t padding = NbState * 16 - filesize;
-    
-    uint8_t (*plaintext)[4][4] = calloc(NbState, sizeof(uint8_t[4][4]));
-    
-    // Lire le fichier dans plaintext
-    uint8_t buffer[16];
-    for(int i = 0; i < NbState; i++){
-        memset(buffer, 0, 16);
-        int bytes_read = fread(buffer, 1, 16, file_in);
-        
-        // Ajouter le padding PKCS7 au dernier bloc
-        if(i == NbState - 1){
-            for(int j = bytes_read; j < 16; j++){
-                buffer[j] = padding;
-            }
-        }
-        
-        int idx = 0;
-        for(int colonne = 0; colonne < 4; colonne++){
-            for(int ligne = 0; ligne < 4; ligne++){
-                plaintext[i][ligne][colonne] = buffer[idx++];
-            }
-        }
-    }
-    fclose(file_in);
 
-    // CHIFFREMENT DES DONNEES
-    uint8_t (*ciphertext)[4][4] = calloc(NbState, sizeof(uint8_t[4][4]));
-    for(int compteur = 0; compteur < NbState; compteur++){
-        uint8_t CompteurBlockState[4][4];
-        ConterBlockGenerator(CompteurBlockState, nonce, compteur);
-        AES_Encrypt_State(CompteurBlockState, key);
-
-        for(int ligne = 0; ligne < 4; ligne++){
-            for(int colonne = 0; colonne < 4; colonne++){
-                ciphertext[compteur][ligne][colonne] = plaintext[compteur][ligne][colonne] ^ CompteurBlockState[ligne][colonne];
-            }
-        }
-    }
-
-    // GENERATION DU TAG
-    uint8_t tag[16];
-    GHASH(tag, ciphertext, NbState, key);
-
-    // ECRITURE DU FICHIER CHIFFRE
-    FILE* file_out = fopen(path, "wb");
+    // Path tempo
+    FILE* file_out = fopen("./Encrypted.tmp", "wb");
     if(!file_out){
-        free(plaintext);
-        free(ciphertext);
         return 1;
     }
+    fwrite(nonce,1 , 12, file_out);
+
+    // Création de la crée dérivée
+    uint8_t bufferStateH[4][4];
+    memset(bufferStateH, 0, 16);
+    AES_Encrypt_State(bufferStateH, key);
+    uint8_t zeroEncrypted[16];
+    memcpy(zeroEncrypted, (uint8_t*)bufferStateH, 16);
     
-    fwrite(nonce, 1, 12, file_out);
-    
-    for(int i = 0; i < NbState; i++){
-        for(int colonne = 0; colonne < 4; colonne++){
-            for(int ligne = 0; ligne < 4; ligne++){
-                fwrite(&ciphertext[i][ligne][colonne], 1, 1, file_out);
+    uint8_t plaintextState[16];
+    uint8_t accumulateur[16] = {0x00};
+    for(int state=0;state<NbState;state++){
+        memset(plaintextState, 0, 16);
+        int bytes_read = fread(plaintextState, 1, 16, file_in);
+
+        // Application du padding
+        if(state == NbState - 1){
+            for(int j = bytes_read; j < 16; j++){
+                plaintextState[j] = padding;
             }
         }
+
+        // Chiffrer en CTR
+        uint8_t CompteurBlockState[4][4];
+        ConterBlockGenerator(CompteurBlockState, nonce, state);
+        AES_Encrypt_State(CompteurBlockState, key);
+
+        // Création du ciphertext
+        uint8_t ciphertextState[16];
+        int index = 0;
+        for(int colonne = 0; colonne < 4; colonne++){
+            for(int ligne = 0; ligne < 4; ligne++){
+                ciphertextState[index] = plaintextState[index] ^ CompteurBlockState[ligne][colonne];
+                index++;
+            }
+        }
+
+        // GHASH
+        for(int i = 0; i < 16; i++){
+            accumulateur[i] ^= ciphertextState[i];
+        }
+        uint8_t temp[16];
+        gf128_multiply(temp,accumulateur,zeroEncrypted);
+        memcpy(accumulateur,temp,16);
+
+        fwrite(ciphertextState, 1, 16, file_out);
     }
-    
-    fwrite(tag, 1, 16, file_out);
+
+    fwrite(accumulateur, 1, 16, file_out);
 
     fclose(file_out);
-    free(plaintext);
-    free(ciphertext);
+    fclose(file_in);
+
+    remove(path);  // Supprimer l'ancien fichier
+    rename("./Encrypted.tmp", path);  // Renommer le temporaire 
     return 0;
 }
 
 int AES_GCM_Decrypt_File(char* path,uint8_t key[32]){
-    FILE* file = fopen(path, "rb");
-    if(file == NULL){
+    FILE* fileInfo = fopen(path, "rb");
+    if(fileInfo == NULL){
         return 1;
     }
 
     // Déterminer la taille du fichier
-    fseek(file, 0, SEEK_END);
-    long filesize = ftell(file);
-    rewind(file);
+    fseek(fileInfo, 0, SEEK_END);
+    long filesize = ftell(fileInfo);
+    rewind(fileInfo);
 
     // Taille du ciphertext = taille totale - nonce(12) - tag(16)
     int NbState = (filesize - 12 - 16) / 16;
 
     // RECUPERATION DE LA NONCE
     uint8_t nonce[12];
-    fread(nonce, sizeof(uint8_t), 12, file);
+    fread(nonce, sizeof(uint8_t), 12, fileInfo);
 
-    // RECUPERATION DU CIPHERTEXT
-    uint8_t (*ciphertext)[4][4] = calloc(NbState,sizeof(uint8_t[4][4]));
-    for(int i=0;i<NbState;i++){
-        for(int colonne = 0; colonne < 4; colonne++){
-            for(int ligne = 0; ligne < 4; ligne++){
-                uint8_t buffer;
-                fread(&buffer, sizeof(uint8_t), 1, file);
-                ciphertext[i][ligne][colonne] = buffer;
-            }
-        }
-    }
+    // Création de la crée dérivée
+    uint8_t bufferStateH[4][4];
+    memset(bufferStateH, 0, 16);
+    AES_Encrypt_State(bufferStateH, key);
+    uint8_t zeroEncrypted[16];
+    memcpy(zeroEncrypted, (uint8_t*)bufferStateH, 16);
 
-    // RECUPERATION DU TAG
-    uint8_t tag[16];
-    fread(tag, sizeof(uint8_t), 16, file);
-    // CALCULE DU TAG
-    uint8_t calculated_tag[16];
-    GHASH(calculated_tag, ciphertext, NbState, key);
-
-    // VERIFICATION DE L'INTEGRITER DU FICHIER
-    for(int i=0;i<16;i++){
-        if(tag[i] != calculated_tag[i]){
-            return 2;
-        }
-    }
-    fclose(file);
-
-    // RECUPERATION DU PLAINTEXT
-    uint8_t (*plaintext)[4][4] = calloc(NbState,sizeof(uint8_t[4][4]));
-    for(int compteur=0;compteur<NbState;compteur++){
-        uint8_t CompteurBlockState[4][4];
-        ConterBlockGenerator(CompteurBlockState,nonce,compteur);
-        AES_Encrypt_State(CompteurBlockState,key);
-
-        for(int ligne = 0; ligne < 4; ligne++){
-            for(int colonne = 0; colonne < 4; colonne++){
-                plaintext[compteur][ligne][colonne] = CompteurBlockState[ligne][colonne] ^ ciphertext[compteur][ligne][colonne];
-            }
-        }
-    }
-
-    // RETRAIT DU PADDING
-    // Le padding est stocké dans le dernier octet du dernier bloc
-    // En suivant l'ordre colonne→ligne, c'est plaintext[NbState-1][3][3]
-    uint8_t padding = plaintext[NbState - 1][3][3];
-    long NombreOctet = (long)NbState * 16 - padding;
-
-    FILE* file_write = fopen(path, "wb");
+    FILE* file_write = fopen("./Decrypted.tmp", "wb");
     if(file_write == NULL){
-        free(ciphertext);
-        free(plaintext);
         return 1;
     }
 
-    // ECRITURE DU FICHIER
-    long indexOctet = 0;
-    for(int i = 0; i < NbState; i++){
+    uint8_t plaintextState[16];
+    uint8_t accumulateur[16] = {0x00};
+    for(int state=0;state<NbState;state++){
+        // Lecture du ciphertext
+        uint8_t ciphertextState[16];
+        fread(ciphertextState, 1, 16, fileInfo);
+
+        // GHASH
+        for(int i = 0; i < 16; i++){
+            accumulateur[i] ^= ciphertextState[i];
+        }
+        uint8_t temp[16];
+        gf128_multiply(temp,accumulateur,zeroEncrypted);
+        memcpy(accumulateur,temp,16);
+
+        // Dechiffrement en CTR
+        uint8_t CompteurBlockState[4][4];
+        ConterBlockGenerator(CompteurBlockState, nonce, state);
+        AES_Encrypt_State(CompteurBlockState, key);
+
+        // Récupération du plaintext
+        int index = 0;
         for(int colonne = 0; colonne < 4; colonne++){
             for(int ligne = 0; ligne < 4; ligne++){
-                if(indexOctet < NombreOctet){
-                    fwrite(&plaintext[i][ligne][colonne], 1, 1, file_write);
-                    indexOctet++;
-                }
+                plaintextState[index] = ciphertextState[index] ^ CompteurBlockState[ligne][colonne];
+                index++;
             }
+        }
+
+        // Ecriture du plaintext
+        // Si c'est pas la derniére state
+        if(state < NbState - 1){
+            fwrite(plaintextState, 1, 16, file_write);
+        } else {
+            uint8_t padding = plaintextState[15];  // Le dernier octet = padding
+            int bytes_to_write = 16 - padding;
+            fwrite(plaintextState, 1, bytes_to_write, file_write);
         }
     }
 
+
+    // RECUPERATION DU tag
+    uint8_t tag[16];
+    fread(tag, 1, 16, fileInfo);
+
+    // Vérification de l'intégritée du fichier 
+    for(int i = 0; i < 16; i++){
+        if(tag[i] != accumulateur[i]){
+            fclose(fileInfo);
+            fclose(file_write);
+            return 2;  // Authentification échouée
+        }
+    }
+
+    fclose(fileInfo);
     fclose(file_write);
-    free(ciphertext);
-    free(plaintext);
+
+    remove(path);  // Supprimer l'ancien fichier
+    rename("./Decrypted.tmp", path);  // Renommer le temporaire
     return 0;
 }
 
