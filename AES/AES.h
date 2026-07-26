@@ -51,8 +51,8 @@ void Explode(uint8_t cle[32], word w[8]);
 void GenerateKey(word finaleW[60], word initialW[8]);
 
 
-void AES_Encrypt_state(uint8_t state[4][4], uint8_t cle[32]);
-void AES_Decrypt_state(uint8_t state[4][4], uint8_t cle[32]);
+void AES_Encrypt_State(uint8_t state[4][4], uint8_t cle[32]);
+void AES_Decrypt_State(uint8_t state[4][4], uint8_t cle[32]);
 
 void fileBinaryTrancription(uint8_t (*dest)[4][4], char* path);
 

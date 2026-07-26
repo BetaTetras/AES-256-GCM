@@ -235,7 +235,7 @@ Sinon:
 
 ## 🔐 FONCTIONS DE CHIFFREMENT/DÉCHIFFREMENT PRINCIPAL
 
-### `void AES_Encrypt_state(uint8_t state[4][4], uint8_t cle[32])`
+### `void AES_Encrypt_State(uint8_t state[4][4], uint8_t cle[32])`
 **Utilité:** **Chiffre une matrice 4×4** (16 octets) avec AES-256.
 
 **Étapes:**
@@ -254,7 +254,7 @@ Sinon:
 
 **Résultat:** État chiffré.
 
-### `void AES_Decrypt_state(uint8_t state[4][4], uint8_t cle[32])`
+### `void AES_Decrypt_State(uint8_t state[4][4], uint8_t cle[32])`
 **Utilité:** **Déchiffre une matrice 4×4** avec la même clé.
 
 **Étapes (inverse de chiffrement):**
@@ -313,7 +313,7 @@ dest[2] = matrice 4×4 avec padding
 ┌─────────────────────────────────────────┐
 │ 1. Chiffrement d'une matrice            │
 ├─────────────────────────────────────────┤
-│ AES_Encrypt_state(state, cle)           │
+│ AES_Encrypt_State(state, cle)           │
 │   ↓ AddRoundKey (W[0..3])               │
 │   ↓ Boucle 13 fois:                     │
 │     ↓ SubBytes → ShiftRows              │
@@ -326,7 +326,7 @@ dest[2] = matrice 4×4 avec padding
 ┌─────────────────────────────────────────┐
 │ 2. Déchiffrement de la matrice          │
 ├─────────────────────────────────────────┤
-│ AES_Decrypt_state(state, cle)           │
+│ AES_Decrypt_State(state, cle)           │
 │   ↓ AddRoundKey (W[56..59])             │
 │   ↓ Boucle 13 fois (inverse):           │
 │     ↓ InvShiftRows → InvSubBytes        │
@@ -355,8 +355,8 @@ dest[2] = matrice 4×4 avec padding
 | `mul` | Multiplication | GF(2^8) ×a | InvMixColumns |
 | `addRoundKey` | Clé | Mélange clé | Tous les 2 étapes |
 | `GenerateKey` | Clé | Génère 60 mots | Chiffrement & Déchiffrement |
-| `AES_Encrypt_state` | Principal | Chiffre | main() |
-| `AES_Decrypt_state` | Principal | Déchiffre | main() |
+| `AES_Encrypt_State` | Principal | Chiffre | main() |
+| `AES_Decrypt_State` | Principal | Déchiffre | main() |
 | `fileBinaryTrancription` | I/O | Charge fichier | Traitement fichiers |
 
 ---
