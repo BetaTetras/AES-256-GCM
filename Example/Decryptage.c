@@ -10,7 +10,7 @@ int main(){
     uint8_t Cle[32];
 
     //Génération de la cle depuis une string (mot de passe)
-    // StringToKeyConverter("Password123",&Cle);
+    StringToKeyConverter("Password123",&Cle);
 
     // Chiffrement du fichier nommée "test.txt" avec la cle générée
     // AES_Encrypt_File("./Subaru.txt",Cle);
@@ -21,7 +21,7 @@ int main(){
     // le mot de passe qui a permis de crée la clé de chiffrement 
 
     // AES_Decrypt_File("./Subaru.txt",Cle);
-    // AES_GCM_Decrypt_File("./Subaru.txt",Cle);
+    AES_GCM_Decrypt_File("./Subaru.txt",Cle);
     
     return 0;
 }
