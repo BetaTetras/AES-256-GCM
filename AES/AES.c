@@ -638,8 +638,17 @@ int AES_GCM_Encrypt_File(char* path,char* password){
 
 
     // Path tempo
-    FILE* file_out = fopen("./Encrypted.tmp", "wb");
+    char* tmpPath = calloc(strlen(path)+5,sizeof(char));
+    if(tmpPath == NULL){
+        fclose(file_in);
+        return 1;
+    }
+    memcpy(tmpPath,path,strlen(path));
+    strcat(tmpPath,".tmp");
+    FILE* file_out = fopen(tmpPath, "wb");
     if(!file_out){
+        free(tmpPath);
+        fclose(file_in);
         return 1;
     }
     fwrite(salt,  1, 16, file_out);   // → octets 0 à 15 du fichier
@@ -748,8 +757,12 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     fclose(file_out);
     fclose(file_in);
 
-    remove(path);  // Supprimer l'ancien fichier
-    rename("./Encrypted.tmp", path);  // Renommer le temporaire 
+    if(rename(tmpPath, path) != 0){
+        remove(tmpPath);
+        free(tmpPath);
+        return 1;
+    }
+    free(tmpPath);
     return 0;
 }
 
@@ -863,9 +876,17 @@ int AES_GCM_Decrypt_File(char* path,char* password){
 
     // 2e passage : on revient au 1er morceau (juste après la nonce de 12 octets)
     fseek(fileInfo, 28, SEEK_SET);
-
-    FILE* file_write = fopen("./Decrypted.tmp", "wb");
+    char* tmpPath = calloc(strlen(path)+5,sizeof(char));
+    if(tmpPath == NULL){
+        fclose(fileInfo);
+        return 1;
+    }
+    memcpy(tmpPath,path,strlen(path));
+    strcat(tmpPath,".tmp");
+    FILE* file_write = fopen(tmpPath, "wb");
     if(file_write == NULL){
+        fclose(fileInfo);
+        free(tmpPath);
         return 1;
     }
 
@@ -951,6 +972,9 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     for(int i = 0; i < 16; i++){
         if(tag[i] != accumulateur[i]){
             fclose(file_write);
+            fclose(fileInfo);
+            remove(tmpPath);
+            free(tmpPath);
             return 2;  // Authentification échouée
         }
     }
@@ -958,8 +982,12 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     fclose(fileInfo);
     fclose(file_write);
 
-    remove(path);  // Supprimer l'ancien fichier
-    rename("./Decrypted.tmp", path);  // Renommer le temporaire
+    if(rename(tmpPath, path) != 0){
+        remove(tmpPath);
+        free(tmpPath);
+        return 1;
+    }
+    free(tmpPath);
     return 0;
 }
 
