@@ -5,27 +5,27 @@ Bibliothèque C de chiffrement de fichiers par mot de passe, écrite entièremen
 Un appel suffit pour chiffrer un fichier en place avec un mot de passe ; le déchiffrement vérifie l'intégrité du fichier avant d'écrire quoi que ce soit.
 
 > [!WARNING]
-> **Projet pédagogique, non audité.** Le code n'a fait l'objet d'aucune revue de sécurité et le tag d'authentification ne suit pas encore exactement la norme GCM (voir [Conformité et tests](#conformité-et-tests)). Pour protéger des données réelles, utilisez une bibliothèque éprouvée comme libsodium ou OpenSSL.
+> **Projet pédagogique, non audité.** Le code n'a fait l'objet d'aucune revue de sécurité. Pour protéger des données réelles, utilisez une bibliothèque éprouvée comme libsodium ou OpenSSL.
 
 ---
 
 ## Fonctionnalités
 
 - **AES-256** conforme à FIPS-197 (14 rondes, expansion de clé en 60 mots).
-- **Chiffrement authentifié de type GCM** : chiffrement en mode compteur (CTR) et tag d'authentification de 16 octets.
+- **Chiffrement authentifié AES-256-GCM** conforme à NIST SP 800-38D : chiffrement en mode compteur (CTR) et tag d'authentification de 16 octets. Les fichiers sont lisibles par toute autre implémentation GCM (voir [Compatibilité](#compatibilité)).
 - **Dérivation de clé PBKDF2-HMAC-SHA256** : la clé de 32 octets est dérivée du mot de passe et d'un sel aléatoire.
 - **Sel et nonce aléatoires** tirés de `/dev/urandom` à chaque chiffrement : chiffrer deux fois le même fichier avec le même mot de passe donne deux résultats différents.
 - **Traitement par blocs de 16 octets** : la mémoire utilisée reste constante, quelle que soit la taille du fichier.
 - **Pas de padding** : le texte chiffré a exactement la taille du fichier d'origine (+ 44 octets d'en-tête et de tag).
-- **Écriture sûre** : le résultat est écrit dans `<fichier>.tmp` puis renommé ; en cas de mauvais mot de passe ou de fichier altéré, rien n'est écrit et l'original reste intact.
+- **Écriture sûre** : le résultat est écrit dans `<fichier>.tmp` puis renommé ; en cas de mauvais mot de passe ou de fichier altéré, rien n'est écrit et l'original reste intact. Le fichier garde ses droits d'accès (un fichier en `600` reste en `600`).
 
 ---
 
 ## Démarrage rapide
 
-### 1. Créer l'en-tête
+### 1. L'en-tête
 
-Le code tient dans un seul fichier source (appelé ici `aes.c`). Pour l'utiliser depuis un autre fichier, créer `aes.h` avec les prototypes publics :
+Le code tient dans un seul fichier source, `AES.c`. L'en-tête `AES.h` contient les prototypes publics :
 
 ```c
 #ifndef AES_H
@@ -54,7 +54,7 @@ int  PBKDF2(uint8_t* dest, char* password, size_t size_password,
 ```c
 #include <stdio.h>
 #include <string.h>
-#include "aes.h"
+#include "AES.h"
 
 int main(int argc, char *argv[]) {
     if (argc != 4) {
@@ -81,13 +81,13 @@ int main(int argc, char *argv[]) {
 ### 3. Compiler et lancer
 
 ```bash
-gcc -std=c11 -Wall -Wextra -O2 -o aescli main.c aes.c
+gcc -std=c11 -Wall -Wextra -O2 -o aescli main.c AES.c
 
 ./aescli chiffrer   note.txt "mon mot de passe"
 ./aescli dechiffrer note.txt "mon mot de passe"
 ```
 
-**Plateformes :** Linux, macOS, BSD (tout système fournissant `/dev/urandom`). Windows natif n'est pas pris en charge.
+**Plateformes :** Linux, macOS, BSD (tout système POSIX fournissant `/dev/urandom`). Windows natif n'est pas pris en charge.
 
 ---
 
@@ -191,6 +191,7 @@ Tag       = S ⊕ AES-256(K, nonce ‖ 00 00 00 01)
 
 - Le **bloc longueur** empêche d'ajouter ou de retirer des blocs sans changer le tag.
 - Le **masque** `AES(K, nonce ‖ 1)` lie le tag à la nonce et cache la valeur de GHASH, donc de H.
+- La **multiplication dans GF(2¹²⁸)** suit la convention de GCM : bits rangés à l'envers, décalage vers la droite et réduction par `0xE1` sur le premier octet (SP 800-38D, § 6.3).
 
 ### Organisation du code
 
@@ -227,7 +228,8 @@ Chaque composant a été testé contre les vecteurs de test officiels :
 | HMAC-SHA256 | RFC 4231, cas 2 et cas 6 (clé de 131 octets) | ✅ |
 | PBKDF2-HMAC-SHA256 | `"password"` / `"salt"`, 1 et 4 096 itérations | ✅ |
 | Texte chiffré GCM (flux CTR) | NIST GCM, cas de test 14 | ✅ |
-| **Tag GCM** | NIST GCM, cas de test 14 | ❌ |
+| Multiplication GF(2¹²⁸) (GHASH) | NIST GCM, cas de test 2 | ✅ |
+| Fichier complet (sel, nonce, chiffré, tag) | Comparaison avec `AESGCM` (Python `cryptography`), dans les deux sens, fichiers de 0 à 65 537 octets | ✅ |
 
 Tests sur fichiers (aller-retour chiffrement → déchiffrement) :
 
@@ -235,30 +237,27 @@ Tests sur fichiers (aller-retour chiffrement → déchiffrement) :
 |----------|:--------:|
 | Fichiers de 0, 1, 15, 16, 17, 100, 1 000 et 65 537 octets : contenu restitué à l'identique, taille + 44 octets | ✅ |
 | Mauvais mot de passe → code `2`, fichier intact | ✅ |
-| Un octet du fichier chiffré modifié → code `2` | ✅ |
+| Chaque octet d'un fichier chiffré modifié un par un → code `2` | ✅ |
 | Fichier de moins de 44 octets → code `1` | ✅ |
+| Fichier en `600` → toujours `600` après chiffrement et déchiffrement | ✅ |
 
-### Écarts avec la norme GCM
+### Compatibilité
 
-L'authentification fonctionne de façon cohérente entre chiffrement et déchiffrement (toutes les altérations testées sont détectées), mais le tag n'est **pas** celui de la norme NIST SP 800-38D. Conséquence : les fichiers produits **ne peuvent pas être déchiffrés par une implémentation GCM standard** (OpenSSL, `cryptography` en Python…), sauf le cas particulier du fichier vide. Cette variante de GHASH n'a pas été analysée du point de vue sécurité.
+Le format suit la norme AES-256-GCM : avec la clé PBKDF2 (même mot de passe, même sel, 13 000 itérations), n'importe quelle implémentation GCM conforme peut déchiffrer les fichiers, et inversement.
 
-Deux écarts en sont la cause :
-
-1. **H est lu dans le mauvais ordre.** `memcpy(zeroEncrypted, (uint8_t*)bufferStateH, 16)` copie la matrice ligne par ligne, alors que la sortie d'AES se lit colonne par colonne. H se retrouve transposé.
-2. **`gf128_multiply` n'utilise pas la convention de GCM.** Elle décale vers la gauche et réduit avec `0x87` sur le dernier octet ; GCM utilise l'ordre de bits inversé : décalage vers la droite et réduction avec `0xE1` sur le premier octet (SP 800-38D, § 6.3).
-
-Une version corrigée de ces deux points a été testée : ses fichiers sont déchiffrés sans erreur par `AESGCM` (Python `cryptography`) avec la même clé PBKDF2. **Attention :** appliquer cette correction change le tag, donc les fichiers chiffrés avec la version actuelle ne seront plus lisibles par la version corrigée. Les déchiffrer avant de mettre à jour.
+**Fichiers chiffrés avant la V2.0 :** le tag était calculé autrement (H lu dans le mauvais ordre, multiplication GF(2¹²⁸) non conforme), et les plus anciennes versions n'utilisaient pas de sel PBKDF2. Ces fichiers sont refusés (code `2`) : les déchiffrer avec l'ancienne version avant de mettre à jour.
 
 ---
 
 ## Performances
 
-Mesures indicatives (`gcc -O2`, machine de test Linux x86-64) :
+Mesures indicatives (`gcc -O2`, Raspberry Pi 4) :
 
 | Opération | Durée |
 |-----------|-------|
-| Dérivation de clé PBKDF2 (13 000 itérations) | ≈ 0,3 s par chiffrement ou déchiffrement |
-| Chiffrement d'un fichier de 4 Mo | ≈ 1,7 s (≈ 3 Mo/s) |
+| Dérivation de clé PBKDF2 (13 000 itérations) | ≈ 1 s par chiffrement ou déchiffrement |
+| Chiffrement d'un fichier de 4 Mo | ≈ 3,5 s |
+| Déchiffrement d'un fichier de 4 Mo (deux passes) | ≈ 5,2 s |
 
 Le code privilégie la lisibilité sur la vitesse :
 
@@ -272,7 +271,6 @@ Le code privilégie la lisibilité sur la vitesse :
 
 **Sécurité**
 
-- Tag GCM non conforme à la norme (voir [Écarts avec la norme GCM](#écarts-avec-la-norme-gcm)).
 - 13 000 itérations PBKDF2, c'est peu : l'OWASP recommande 600 000 itérations pour PBKDF2-HMAC-SHA256. Penser à enregistrer le nombre d'itérations dans l'en-tête du fichier avant de l'augmenter.
 - La comparaison du tag s'arrête au premier octet différent (comparaison non constante en temps).
 - La clé, les sous-clés et les valeurs intermédiaires ne sont pas effacées de la mémoire après usage.
@@ -285,6 +283,12 @@ Le code privilégie la lisibilité sur la vitesse :
 - Un fichier `<fichier>.tmp` déjà présent est écrasé sans avertissement.
 - Taille maximale : environ 32 Gio (compteur de blocs en `int`), et 2 Gio sur les systèmes où `long` fait 32 bits (`ftell`).
 - Toutes les fonctions sont globales avec des noms génériques. `SHA256` et `HMAC` portent le même nom que des fonctions d'OpenSSL : lier les deux dans un même programme provoquera un conflit. Déclarer les fonctions internes `static` ou leur ajouter un préfixe.
+
+---
+
+## Licence
+
+MIT, voir [LICENSE](LICENSE).
 
 ---
 

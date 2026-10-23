@@ -2,6 +2,8 @@
 #include <stdint.h> 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include "AES.h"
 
 typedef uint8_t word[4];
 
@@ -569,31 +571,33 @@ void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]){
             }
         }
 
-        // Most Significant Bit 
-        uint8_t msb = (a_CPY[0] >> 7) & 1;
+        // Least Significant Bit : le bit qui va "sortir" à droite
+        uint8_t lsb = a_CPY[15] & 1;
 
-
-        /* En gros dans la suite de mon code on décale d'un bit vers la GAUCHE
-         * sur TOUT les octete confondu :
-         *   Octet5    Octet4   Octet3    Octet2    Octet1
-         * [10000000][10000000][00001100][00000000][00000010]
-         * [00000001][00000000][00011000][00000000][00000101]
+        /* En GCM les bits sont rangés à l'envers : le bit n°0 est le bit de
+         * GAUCHE de l'octet 0. Multiplier par x revient donc à décaler d'un
+         * bit vers la DROITE sur TOUT les octets confondus :
+         *   Octet0    Octet1   ...  Octet15
+         * [10000001][00000000]...[00001101]
+         * [01000000][10000000]...[00000110]   le 1 de droite de l'Octet15 sort
+         * Le 1 de droite de l'Octet0 passe à gauche de l'Octet1 (extra).
         */
         int extra = 0;
         uint8_t buffer;
-        int index = 15;
         for(int j=0;j<16;j++){
-            buffer = a_CPY[index];
-            a_CPY[index] = a_CPY[index] << 1;
+            buffer = a_CPY[j];
+            a_CPY[j] = a_CPY[j] >> 1;
             if(extra){
-                a_CPY[index] = a_CPY[index] | 0x01;
+                a_CPY[j] = a_CPY[j] | 0x80;
             }
-            extra = 0;
-            extra =  buffer >> 7;
-            index --;
+            extra = buffer & 1;
         }
-        if(msb == 1){
-            a_CPY[15] ^= 0x87;
+        /* Si un bit est sorti, on le replie : x^128 = x^7 + x^2 + x + 1,
+         * ce qui s'écrit 0xE1 (11100001 = bits 0, 1, 2 et 7) dans le
+         * PREMIER octet.
+        */
+        if(lsb == 1){
+            a_CPY[0] ^= 0xE1;
         }
     
     }
@@ -651,16 +655,39 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         fclose(file_in);
         return 1;
     }
+
+    /* Le .tmp prend les mêmes droits que le fichier d'origine.
+     * Sans ça, fopen crée un fichier neuf avec les droits par défaut :
+     * un fichier en 600 (lisible par toi seul) devenait 664 (lisible par tous).
+     * & 0777 : on garde seulement les droits rwx du propriétaire, du groupe et des autres.
+     */
+    struct stat infos;
+    if(stat(path, &infos) != 0 || chmod(tmpPath, infos.st_mode & 0777) != 0){
+        fclose(file_out);
+        fclose(file_in);
+        remove(tmpPath);
+        free(tmpPath);
+        return 1;
+    }
     fwrite(salt,  1, 16, file_out);   // → octets 0 à 15 du fichier
     fwrite(nonce, 1, 12, file_out);   // → octets 16 à 27
 
 
-    // Création de la crée dérivée
+    // Création de la clé dérivée H (AES de 16 octets à 0)
     uint8_t bufferStateH[4][4];
     memset(bufferStateH, 0, 16);
     AES_Encrypt_State(bufferStateH, key);
+
+    // La sortie d'AES se lit colonne par colonne, comme le ciphertext.
+    // (un memcpy la lirait ligne par ligne : H serait dans le désordre)
     uint8_t zeroEncrypted[16];
-    memcpy(zeroEncrypted, (uint8_t*)bufferStateH, 16);
+    int indexH = 0;
+    for(int colonne = 0; colonne < 4; colonne++){
+        for(int ligne = 0; ligne < 4; ligne++){
+            zeroEncrypted[indexH] = bufferStateH[ligne][colonne];
+            indexH++;
+        }
+    }
     
     uint8_t plaintextState[16];
     uint8_t accumulateur[16] = {0x00};
@@ -801,17 +828,26 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         return 1;
     }
 
-    // Création de la crée dérivée
+    // Création de la clé dérivée H (AES de 16 octets à 0)
     uint8_t bufferStateH[4][4];
     memset(bufferStateH, 0, 16);
     AES_Encrypt_State(bufferStateH, key);
+
+    // La sortie d'AES se lit colonne par colonne, comme le ciphertext.
+    // (un memcpy la lirait ligne par ligne : H serait dans le désordre)
     uint8_t zeroEncrypted[16];
-    memcpy(zeroEncrypted, (uint8_t*)bufferStateH, 16);
+    int indexH = 0;
+    for(int colonne = 0; colonne < 4; colonne++){
+        for(int ligne = 0; ligne < 4; ligne++){
+            zeroEncrypted[indexH] = bufferStateH[ligne][colonne];
+            indexH++;
+        }
+    }
 
     /* VERIFICATION DE LA SIGNATURE AVANT D'ECRIRE QUOI QUE CE SOIT
      * 1er passage : on lit tous les morceaux seulement pour calculer la
      * signature, sans rien déchiffrer ni écrire. Si elle est fausse, on
-     * s'arrête ici : Decrypted.tmp n'est jamais créé.
+     * s'arrête ici : le fichier .tmp n'est jamais créé.
      * Les accolades { } forment un bloc : tout ce qui est déclaré dedans
      * disparaît à la fin, donc le code plus bas peut réutiliser les mêmes
      * noms (blocLongueur, masqueTag, tag...) sans conflit.
@@ -874,7 +910,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         }
     }
 
-    // 2e passage : on revient au 1er morceau (juste après la nonce de 12 octets)
+    // 2e passage : on revient au 1er morceau (juste après le sel de 16 octets et la nonce de 12 = 28)
     fseek(fileInfo, 28, SEEK_SET);
     char* tmpPath = calloc(strlen(path)+5,sizeof(char));
     if(tmpPath == NULL){
@@ -886,6 +922,17 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     FILE* file_write = fopen(tmpPath, "wb");
     if(file_write == NULL){
         fclose(fileInfo);
+        free(tmpPath);
+        return 1;
+    }
+
+    // Le .tmp prend les mêmes droits que l'original (explication dans AES_GCM_Encrypt_File).
+    // Ici c'est le plus important : le .tmp va contenir le texte déchiffré.
+    struct stat infos;
+    if(stat(path, &infos) != 0 || chmod(tmpPath, infos.st_mode & 0777) != 0){
+        fclose(file_write);
+        fclose(fileInfo);
+        remove(tmpPath);
         free(tmpPath);
         return 1;
     }
@@ -1138,7 +1185,7 @@ uint32_t sig1(uint32_t x){
     return morceau1 ^ morceau2 ^ morceau3;
 }
 
-void compressing(uint32_t H[8], uint8_t* mess){   // CORRIGÉ : H en paramètre
+void compressing(uint32_t H[8], uint8_t* mess){
     uint32_t W[64];
 
     // Partie 1 : W[0] à W[15], on colle les octets du bloc 4 par 4
