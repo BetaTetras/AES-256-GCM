@@ -51,6 +51,7 @@ static const uint8_t RCON[11] = {
 
 // SHA-256
 #define HASH_CONST {0x6a09e667,0xbb67ae85 ,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}
+#define PBKDF2_TOURS 13000
 
 static const uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -88,8 +89,6 @@ void AES_Decrypt_State(uint8_t state[4][4], uint8_t const cle[32]);
 
 int ByteTranscription(char* path,int *NbState,uint8_t (**dest)[4][4]);
 
-int generateSHA256KeyFromString(const char* str,uint8_t (*key)[32]);
-
 // SHA-256
 int padding(uint8_t** dest,uint8_t* mess,size_t* size);
 void compressing(uint32_t H[8], uint8_t* mess);
@@ -101,14 +100,16 @@ uint32_t SIG1(uint32_t x);
 uint32_t sig0(uint32_t x);
 uint32_t sig1(uint32_t x);
 int SHA256(uint8_t* dest, uint8_t* mess, size_t size);
+int HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t size_mess);
+int PBKDF2(uint8_t* dest,char* password,size_t size_password,uint8_t* salt,size_t size_salt,size_t tour);
 
 int AES_Encrypt_File(char* path,uint8_t key[32]);
 int AES_Decrypt_File(char* path,uint8_t key[32]);
 
 void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],int compteur);
 void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]);
-int AES_GCM_Encrypt_File(char* path,uint8_t key[32]);
-int AES_GCM_Decrypt_File(char* path,uint8_t key[32]);
+int AES_GCM_Encrypt_File(char* path,char* password);
+int AES_GCM_Decrypt_File(char* path,char* password);
 
 /* STATE (Etat)
  * Le state est la matrice de donnée de 4*4 octet qui contien
@@ -598,18 +599,31 @@ void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]){
     }
 }
 
-int AES_GCM_Encrypt_File(char* path,uint8_t key[32]){
+int AES_GCM_Encrypt_File(char* path,char* password){
     // GENERATION DE LA NONCE
     FILE *f = fopen("/dev/urandom", "rb");
     if(f == NULL){
         return 1;
     }
+    
     uint8_t nonce[12];
     if(fread(nonce, sizeof(uint8_t), 12, f) != 12){
         fclose(f);
         return 1;
     }
+    uint8_t salt[16];
+    if(fread(salt,sizeof(uint8_t), 16, f) != 16){
+        fclose(f);
+        return 1;
+    }
     fclose(f);
+
+    // CREATION DE LA CLE AVEC PBKDF2
+    uint8_t key[32];
+    size_t size_password = strlen(password);
+    if(PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS) == 1){
+        return 1;
+    }
 
     // LECTURE DU FICHIER BRUT (sans padding)
     FILE* file_in = fopen(path, "rb");
@@ -628,7 +642,9 @@ int AES_GCM_Encrypt_File(char* path,uint8_t key[32]){
     if(!file_out){
         return 1;
     }
-    fwrite(nonce,1 , 12, file_out);
+    fwrite(salt,  1, 16, file_out);   // → octets 0 à 15 du fichier
+    fwrite(nonce, 1, 12, file_out);   // → octets 16 à 27
+
 
     // Création de la crée dérivée
     uint8_t bufferStateH[4][4];
@@ -737,7 +753,7 @@ int AES_GCM_Encrypt_File(char* path,uint8_t key[32]){
     return 0;
 }
 
-int AES_GCM_Decrypt_File(char* path,uint8_t key[32]){
+int AES_GCM_Decrypt_File(char* path,char* password){
     FILE* fileInfo = fopen(path, "rb");
     if(fileInfo == NULL){
         return 1;
@@ -748,16 +764,29 @@ int AES_GCM_Decrypt_File(char* path,uint8_t key[32]){
     long filesize = ftell(fileInfo);
     rewind(fileInfo);
 
-    long tailleChiffre = filesize - 12 - 16;
+    // 12 = nonce, 16 = salt, 16 = tag
+    long tailleChiffre = filesize - 16 - 12 - 16;
     if(tailleChiffre < 0){
         fclose(fileInfo);
         return 1;
     }
     int NbState = (tailleChiffre + 15) / 16;
 
+    // RECUPERATION DU SEL
+    uint8_t salt[16];
+    fread(salt,sizeof(uint8_t),16, fileInfo);
+
     // RECUPERATION DE LA NONCE
     uint8_t nonce[12];
     fread(nonce, sizeof(uint8_t), 12, fileInfo);
+
+    // FABRICATION DE LA CLE
+    uint8_t key[32];
+    size_t size_password = strlen(password);
+    if(PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS) == 1){
+        fclose(fileInfo);
+        return 1;
+    }
 
     // Création de la crée dérivée
     uint8_t bufferStateH[4][4];
@@ -826,14 +855,14 @@ int AES_GCM_Decrypt_File(char* path,uint8_t key[32]){
         fread(tag, 1, 16, fileInfo);
         for(int i = 0; i < 16; i++){
             if(tag[i] != NewAccumulateur[i]){
-                fclose(fileInfo);   // Decrypted.tmp n'existe pas encore
-                return 2;           // Authentification échouée
+                fclose(fileInfo);
+                return 2;
             }
         }
     }
 
     // 2e passage : on revient au 1er morceau (juste après la nonce de 12 octets)
-    fseek(fileInfo, 12, SEEK_SET);
+    fseek(fileInfo, 28, SEEK_SET);
 
     FILE* file_write = fopen("./Decrypted.tmp", "wb");
     if(file_write == NULL){
@@ -932,38 +961,6 @@ int AES_GCM_Decrypt_File(char* path,uint8_t key[32]){
     remove(path);  // Supprimer l'ancien fichier
     rename("./Decrypted.tmp", path);  // Renommer le temporaire
     return 0;
-}
-
-//////////////////////////////////////////////////////////
-
-// Génére une clé sous uint8_t depuis une string de 0 a +inf char
-void StringToKeyConverter(const char* str,uint8_t (*key)[32]){
-    size_t len = strlen(str);
-
-    for(int i=0;i<32;i++){
-        (*key)[i] = 0x00;
-    }
-
-    for(size_t i=0;i<len;i++){
-        (*key)[i % 32] = (uint8_t)str[i] ^ (*key)[i % 32];
-    }
-
-    for(int i=0;i<10;i++){
-        for(int y=0;y<32;y++){
-            if(y==0){
-                (*key)[y] = SBOX[(*key)[y]] ^ (*key)[31];
-            }else{
-                (*key)[y] = SBOX[(*key)[y]] ^ (*key)[(y-1)%32];
-            }
-        }
-    }
-}
-
-// Génère la clé AES-256 (32 octets) = SHA256 du mot de passe
-int generateSHA256KeyFromString(const char* str,uint8_t (*key)[32]){
-    // *key = les 32 cases de la clé : SHA256 écrit directement dedans
-    // (uint8_t*)str : un char et un uint8_t font 1 octet, pas besoin de copie
-    return SHA256(*key, (uint8_t*)str, strlen(str));
 }
 
 //////////////////////////////////////////////////////////
@@ -1193,5 +1190,91 @@ int SHA256(uint8_t* dest, uint8_t* mess, size_t size){
     }
 
     free(buffer);
+    return 0;
+}
+
+int HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t size_mess){
+    if(dest == NULL){
+        return 1;
+    }
+    // Phase 1
+    uint8_t localKey[64] = {0};
+    if(size_key > 64){
+        if(SHA256(localKey,key,size_key) == 1){
+            return 1;
+        }
+    }else{
+        memcpy(localKey,key,size_key);
+    }
+
+    // Phase 2
+    uint8_t keyIn[64] = {0};
+    uint8_t keyOut[64] = {0};
+    for(int i=0;i<64;i++){
+        keyIn[i] = localKey[i] ^ 0x36;
+        keyOut[i] = localKey[i] ^ 0x5c;
+    }
+
+    // Phase 3
+    uint8_t* buffer = calloc(64 + size_mess,sizeof(uint8_t));
+    if(buffer == NULL){
+        return 1;
+    }
+    memcpy(buffer,keyIn,64);
+    memcpy(buffer+64,mess,size_mess);
+
+    uint8_t hached[32];
+    if(SHA256(hached,buffer,64 + size_mess)){
+        free(buffer);
+        return 1;
+    }
+    free(buffer);
+
+    // Phase 4
+    uint8_t bufferOut[96];
+    memcpy(bufferOut,keyOut,64);
+    memcpy(bufferOut+64,hached,32);
+
+    if(SHA256(dest,bufferOut,96)){
+        return 1;
+    }
+
+    return 0;
+}
+
+int PBKDF2(uint8_t* dest,char* password,size_t size_password,uint8_t* salt,size_t size_salt,size_t tour){
+    if(dest == NULL || tour == 0){
+        return 1;
+    }
+
+    // Phase 1
+    uint8_t ZeroOne[4] = {0x00,0x00,0x00,0x01};
+    uint8_t *mess = calloc(size_salt + 4,sizeof(uint8_t));
+    if(mess == NULL){
+        return 1;
+    }
+    memcpy(mess,salt,size_salt);
+    memcpy(mess+size_salt,ZeroOne,4);
+
+    // Phase 2
+    uint8_t U[32];
+    if(HMAC(U,(uint8_t*)password,size_password,mess,size_salt + 4) == 1){
+        free(mess);
+        return 1;
+    }
+    free(mess);
+
+    memcpy(dest, U, 32);
+    uint8_t Unext[32];
+    for(size_t i=1;i<tour;i++){
+        if(HMAC(Unext,(uint8_t*)password,size_password,U,32) == 1){
+            return 1;
+        }
+        memcpy(U,Unext,32);
+        for(size_t j=0;j<32;j++){
+            dest[j] ^= U[j];
+        }
+    }
+
     return 0;
 }
