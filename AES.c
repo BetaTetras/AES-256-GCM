@@ -791,12 +791,16 @@ int AES_GCM_Decrypt_File(char* path,char* password){
 
         // RECUPERATION DU tag et comparaison
         uint8_t tag[16];
+        int error = 0;
         fread(tag, 1, 16, fileInfo);
         for(int i = 0; i < 16; i++){
-            if(tag[i] != NewAccumulateur[i]){
-                fclose(fileInfo);
-                return 2;
-            }
+            // ^ : différence de l'octet, |= : cumul. Pas de if, donc temps constant
+            error |= tag[i] ^ NewAccumulateur[i];
+        }
+
+        if(error){
+            fclose(fileInfo);
+            return 2;
         }
     }
 
@@ -913,17 +917,21 @@ int AES_GCM_Decrypt_File(char* path,char* password){
 
     // RECUPERATION DU tag
     uint8_t tag[16];
+    int error = 0;
     fread(tag, 1, 16, fileInfo);
 
     // Vérification de l'intégritée du fichier 
     for(int i = 0; i < 16; i++){
-        if(tag[i] != accumulateur[i]){
-            fclose(file_write);
-            fclose(fileInfo);
-            remove(tmpPath);
-            free(tmpPath);
-            return 2;  // Authentification échouée
-        }
+        // ^ : différence de l'octet, |= : cumul. Pas de if, donc temps constant
+        error |= tag[i] ^ accumulateur[i];
+    }
+
+    if(error){
+        fclose(file_write);
+        fclose(fileInfo);
+        remove(tmpPath);
+        free(tmpPath);
+        return 2;  // Authentification échouée
     }
 
     fclose(fileInfo);
@@ -1211,15 +1219,19 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
         // RECUPERATION DU tag et comparaison
         uint8_t tag[16];
+        int error = 0;
         for(size_t i=0;i<16;i++){
             tag[i] = src[index_read];
             index_read++;
         }
 
         for(int i = 0; i < 16; i++){
-            if(tag[i] != NewAccumulateur[i]){
-                return 2;
-            }
+            // ^ : différence de l'octet, |= : cumul. Pas de if, donc temps constant
+            error |= tag[i] ^ NewAccumulateur[i];
+        }
+
+        if(error){
+            return 2;
         }
     }
 
@@ -1304,6 +1316,7 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     // RECUPERATION DU tag
     uint8_t tag[16];
+    int error = 0;
     for(size_t i=0;i<16;i++){
         tag[i] = src[index_read];
         index_read++;
@@ -1311,11 +1324,14 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     // Vérification de l'intégritée du fichier 
     for(int i = 0; i < 16; i++){
-        if(tag[i] != accumulateur[i]){
-            free(*dest);
-            *dest = NULL;
-            return 2;  // Authentification échouée
-        }
+        // ^ : différence de l'octet, |= : cumul. Pas de if, donc temps constant
+        error |= tag[i] ^ accumulateur[i];
+    }
+
+    if(error){
+        free(*dest);
+        *dest = NULL;
+        return 2;  // Authentification échouée
     }
 
     *size_dest = index_write;
