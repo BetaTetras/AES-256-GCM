@@ -53,7 +53,7 @@ static const uint8_t RCON[11] = {
 
 // SHA-256
 #define HASH_CONST {0x6a09e667,0xbb67ae85 ,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}
-#define PBKDF2_TOURS 13000
+#define PBKDF2_TOURS 600000
 
 static const uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -99,8 +99,8 @@ uint32_t SIG0(uint32_t x);
 uint32_t SIG1(uint32_t x);
 uint32_t sig0(uint32_t x);
 uint32_t sig1(uint32_t x);
-int SHA256(uint8_t* dest, uint8_t* mess, size_t size);
-int HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t size_mess);
+int AES_SHA256(uint8_t* dest, uint8_t* mess, size_t size);
+int AES_HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t size_mess);
 int PBKDF2(uint8_t* dest,char* password,size_t size_password,uint8_t* salt,size_t size_salt,size_t tour);
 
 void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],int compteur);
@@ -111,6 +111,8 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
 int AES_GCM_Encrypt_File(char* path,char* password);
 int AES_GCM_Decrypt_File(char* path,char* password);
+
+void uint8_tToZero(uint8_t* p_uint8_t,size_t size);
 
 /* STATE (Etat)
  * Le state est la matrice de donnée de 4*4 octet qui contien
@@ -329,6 +331,10 @@ void AES_Encrypt_State(uint8_t state[4][4], uint8_t const cle[32]){
     SubBytes(state);
     ShiftRows(state);
     addRoundKey(state, GenratedKey + 56);
+
+    // Efface les copies de la clé (GenratedKey commence par la clé)
+    uint8_tToZero((uint8_t*)ExplodedKey, sizeof(ExplodedKey));
+    uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
 }
 
 void AES_Decrypt_State(uint8_t state[4][4], uint8_t const cle[32]) {
@@ -351,6 +357,10 @@ void AES_Decrypt_State(uint8_t state[4][4], uint8_t const cle[32]) {
     InvShiftRows(state);
     InvSubBytes(state);
     addRoundKey(state, GeneratedKey);  // W[0..3]
+
+    // Efface les copies de la clé (GeneratedKey commence par la clé)
+    uint8_tToZero((uint8_t*)ExplodedKey, sizeof(ExplodedKey));
+    uint8_tToZero((uint8_t*)GeneratedKey, sizeof(GeneratedKey));
 }
 
 //////////////////////////////////////////////////////////
@@ -467,12 +477,14 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     uint8_t key[32];
     size_t size_password = strlen(password);
     if(PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS) == 1){
+        uint8_tToZero(key, 32);
         return 1;
     }
 
     // LECTURE DU FICHIER BRUT (sans padding)
     FILE* file_in = fopen(path, "rb");
     if(!file_in){
+        uint8_tToZero(key, 32);
         return 1;
     }
     fseek(file_in, 0, SEEK_END);
@@ -486,6 +498,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     char* tmpPath = calloc(strlen(path)+5,sizeof(char));
     if(tmpPath == NULL){
         fclose(file_in);
+        uint8_tToZero(key, 32);
         return 1;
     }
     memcpy(tmpPath,path,strlen(path));
@@ -494,6 +507,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     if(!file_out){
         free(tmpPath);
         fclose(file_in);
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -508,6 +522,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         fclose(file_in);
         remove(tmpPath);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 1;
     }
     if(fwrite(salt, 1, 16, file_out) != 16){
@@ -515,6 +530,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         fclose(file_in);
         remove(tmpPath);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -523,6 +539,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         fclose(file_in);
         remove(tmpPath);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -564,6 +581,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
             fclose(file_in);
             remove(tmpPath);
             free(tmpPath);
+            uint8_tToZero(key, 32);
             return 1;
         }
 
@@ -597,6 +615,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
             fclose(file_in);
             remove(tmpPath);
             free(tmpPath);
+            uint8_tToZero(key, 32);
             return 1;
         }
     }
@@ -662,6 +681,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         fclose(file_in);
         remove(tmpPath);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -670,6 +690,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         fclose(file_in);
         remove(tmpPath);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 1;
     }
     fclose(file_in);
@@ -677,9 +698,11 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     if(rename(tmpPath, path) != 0){
         remove(tmpPath);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 1;
     }
     free(tmpPath);
+    uint8_tToZero(key, 32);
     return 0;
 }
 
@@ -715,6 +738,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     size_t size_password = strlen(password);
     if(PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS) == 1){
         fclose(fileInfo);
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -794,12 +818,12 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         int error = 0;
         fread(tag, 1, 16, fileInfo);
         for(int i = 0; i < 16; i++){
-            // ^ : différence de l'octet, |= : cumul. Pas de if, donc temps constant
             error |= tag[i] ^ NewAccumulateur[i];
         }
 
         if(error){
             fclose(fileInfo);
+            uint8_tToZero(key, 32);
             return 2;
         }
     }
@@ -809,6 +833,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     char* tmpPath = calloc(strlen(path)+5,sizeof(char));
     if(tmpPath == NULL){
         fclose(fileInfo);
+        uint8_tToZero(key, 32);
         return 1;
     }
     memcpy(tmpPath,path,strlen(path));
@@ -817,6 +842,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     if(file_write == NULL){
         fclose(fileInfo);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -828,6 +854,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         fclose(fileInfo);
         remove(tmpPath);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -874,6 +901,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
             fclose(fileInfo);
             remove(tmpPath);
             free(tmpPath);
+            uint8_tToZero(key, 32);
             return 1;
         }
     }
@@ -922,7 +950,6 @@ int AES_GCM_Decrypt_File(char* path,char* password){
 
     // Vérification de l'intégritée du fichier 
     for(int i = 0; i < 16; i++){
-        // ^ : différence de l'octet, |= : cumul. Pas de if, donc temps constant
         error |= tag[i] ^ accumulateur[i];
     }
 
@@ -931,6 +958,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         fclose(fileInfo);
         remove(tmpPath);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 2;  // Authentification échouée
     }
 
@@ -939,15 +967,18 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     if(fclose(file_write) != 0){
         remove(tmpPath);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 1;
     }
 
     if(rename(tmpPath, path) != 0){
         remove(tmpPath);
         free(tmpPath);
+        uint8_tToZero(key, 32);
         return 1;
     }
     free(tmpPath);
+    uint8_tToZero(key, 32);
     return 0;
 }
 
@@ -982,6 +1013,7 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     uint8_t key[32];
     size_t size_password = strlen(password);
     if(PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS) == 1){
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -989,6 +1021,7 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     int NbState = (size_src + 15) / 16;
     *dest = calloc(size_src + 44,sizeof(uint8_t));
     if((*dest) == NULL){
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -1102,6 +1135,7 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     *size_dest = index_write;
 
+    uint8_tToZero(key, 32);
     return 0;
 }
 
@@ -1147,6 +1181,7 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     uint8_t key[32];
     size_t size_password = strlen(password);
     if(PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS) == 1){
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -1226,11 +1261,11 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         }
 
         for(int i = 0; i < 16; i++){
-            // ^ : différence de l'octet, |= : cumul. Pas de if, donc temps constant
             error |= tag[i] ^ NewAccumulateur[i];
         }
 
         if(error){
+            uint8_tToZero(key, 32);
             return 2;
         }
     }
@@ -1239,6 +1274,7 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     
     *dest = calloc((size_src - 44) + 1,sizeof(uint8_t));
     if((*dest) == NULL){
+        uint8_tToZero(key, 32);
         return 1;
     }
 
@@ -1324,19 +1360,30 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     // Vérification de l'intégritée du fichier 
     for(int i = 0; i < 16; i++){
-        // ^ : différence de l'octet, |= : cumul. Pas de if, donc temps constant
         error |= tag[i] ^ accumulateur[i];
     }
 
     if(error){
         free(*dest);
         *dest = NULL;
+        uint8_tToZero(key, 32);
         return 2;  // Authentification échouée
     }
 
     *size_dest = index_write;
 
+    uint8_tToZero(key, 32);
     return 0;
+}
+
+void uint8_tToZero(uint8_t* p_uint8_t,size_t size){
+    if(p_uint8_t == NULL){
+        return;
+    }
+    volatile uint8_t* p = p_uint8_t;
+    for(size_t i=0;i<size;i++){
+        p[i] = 0x00;
+    }
 }
 
 //////////////////////////////////////////////////////////
@@ -1481,7 +1528,7 @@ void compressing(uint32_t H[8], uint8_t* mess){
 }
 
 
-int SHA256(uint8_t* dest, uint8_t* mess, size_t size){
+int AES_SHA256(uint8_t* dest, uint8_t* mess, size_t size){
     uint32_t H[8] = HASH_CONST;
     uint8_t* buffer = NULL;
 
@@ -1507,14 +1554,14 @@ int SHA256(uint8_t* dest, uint8_t* mess, size_t size){
     return 0;
 }
 
-int HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t size_mess){
+int AES_HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t size_mess){
     if(dest == NULL){
         return 1;
     }
     // Phase 1
     uint8_t localKey[64] = {0};
     if(size_key > 64){
-        if(SHA256(localKey,key,size_key) == 1){
+        if(AES_SHA256(localKey,key,size_key) == 1){
             return 1;
         }
     }else{
@@ -1538,7 +1585,7 @@ int HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t size_me
     memcpy(buffer+64,mess,size_mess);
 
     uint8_t hached[32];
-    if(SHA256(hached,buffer,64 + size_mess)){
+    if(AES_SHA256(hached,buffer,64 + size_mess)){
         free(buffer);
         return 1;
     }
@@ -1549,7 +1596,7 @@ int HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t size_me
     memcpy(bufferOut,keyOut,64);
     memcpy(bufferOut+64,hached,32);
 
-    if(SHA256(dest,bufferOut,96)){
+    if(AES_SHA256(dest,bufferOut,96)){
         return 1;
     }
 
@@ -1572,7 +1619,7 @@ int PBKDF2(uint8_t* dest,char* password,size_t size_password,uint8_t* salt,size_
 
     // Phase 2
     uint8_t U[32];
-    if(HMAC(U,(uint8_t*)password,size_password,mess,size_salt + 4) == 1){
+    if(AES_HMAC(U,(uint8_t*)password,size_password,mess,size_salt + 4) == 1){
         free(mess);
         return 1;
     }
@@ -1581,7 +1628,7 @@ int PBKDF2(uint8_t* dest,char* password,size_t size_password,uint8_t* salt,size_
     memcpy(dest, U, 32);
     uint8_t Unext[32];
     for(size_t i=1;i<tour;i++){
-        if(HMAC(Unext,(uint8_t*)password,size_password,U,32) == 1){
+        if(AES_HMAC(Unext,(uint8_t*)password,size_password,U,32) == 1){
             return 1;
         }
         memcpy(U,Unext,32);

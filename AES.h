@@ -17,8 +17,8 @@ int AES_GCM_Decrypt(uint8_t** dest, size_t* size_dest, uint8_t* src, size_t size
 /* Primitives */
 void AES_Encrypt_State(uint8_t state[4][4], uint8_t const cle[32]);
 void AES_Decrypt_State(uint8_t state[4][4], uint8_t const cle[32]);
-int  SHA256(uint8_t* dest, uint8_t* mess, size_t size);
-int  HMAC(uint8_t* dest, uint8_t* key, size_t size_key, uint8_t* mess, size_t size_mess);
+int  AES_SHA256(uint8_t* dest, uint8_t* mess, size_t size);
+int  AES_HMAC(uint8_t* dest, uint8_t* key, size_t size_key, uint8_t* mess, size_t size_mess);
 int  PBKDF2(uint8_t* dest, char* password, size_t size_password,
             uint8_t* salt, size_t size_salt, size_t tour);
 
