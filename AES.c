@@ -89,8 +89,6 @@ void GenerateKey(word finaleW[60],word initialW[8]);
 void AES_Encrypt_State(uint8_t state[4][4], uint8_t const cle[32]);
 void AES_Decrypt_State(uint8_t state[4][4], uint8_t const cle[32]);
 
-int ByteTranscription(char* path,int *NbState,uint8_t (**dest)[4][4]);
-
 // SHA-256
 int padding(uint8_t** dest,uint8_t* mess,size_t* size);
 void compressing(uint32_t H[8], uint8_t* mess);
@@ -105,11 +103,12 @@ int SHA256(uint8_t* dest, uint8_t* mess, size_t size);
 int HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t size_mess);
 int PBKDF2(uint8_t* dest,char* password,size_t size_password,uint8_t* salt,size_t size_salt,size_t tour);
 
-int AES_Encrypt_File(char* path,uint8_t key[32]);
-int AES_Decrypt_File(char* path,uint8_t key[32]);
-
 void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],int compteur);
 void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]);
+
+int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_src,char* password);
+int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_src,char* password);
+
 int AES_GCM_Encrypt_File(char* path,char* password);
 int AES_GCM_Decrypt_File(char* path,char* password);
 
@@ -356,164 +355,6 @@ void AES_Decrypt_State(uint8_t state[4][4], uint8_t const cle[32]) {
 
 //////////////////////////////////////////////////////////
 
-int ByteTranscription(char* path,int *NbState,uint8_t (**dest)[4][4]){
-    // On ouvre le fichier en readBinary (rb)
-    FILE* file = fopen(path, "rb");
-    if(!file){
-        return 1;
-    }
-
-    // On détermine la taille du fichier 
-    fseek(file, 0, SEEK_END);
-    long size = ftell(file);
-    rewind(file);
-
-    if(size == 0){
-        fclose(file);
-        return 1;
-    }
-
-    // Les octet en trop si fichier non multiple de 16
-    // On détermine le nombre de state
-    if(size % 16 == 0){
-        *NbState = size / 16;
-    }else{
-        *NbState = (size / 16) + 1;
-    }
-
-    // On réalloue dest pour qu'il sois de la taille du nombre de state
-    *dest = realloc(*dest, (*NbState) * sizeof(uint8_t[4][4]));
-
-    for(int state=0;state<*NbState;state++){
-        uint8_t buffer[16] = {0};
-        fread(buffer, 1, 16, file);
-
-        int index = 0;
-        for(int colonne = 0; colonne < 4; colonne++){
-            for(int ligne = 0; ligne < 4; ligne++){
-                (*dest)[state][ligne][colonne] = buffer[index++];
-            }
-        }
-    }
-
-    fclose(file);
-    return 0;
-}
-
-//////////////////////////////////////////////////////////
-
-int AES_Encrypt_File(char* path,uint8_t key[32]){
-    // Appelle d'un pointeur vers une liste de states
-    uint8_t (*b_file)[4][4] = NULL;
-    int NbState;
-
-    // Transcription du fichier en pointeur de liste de state
-    if(ByteTranscription(path,&NbState,&b_file) == 1){
-        return 1;
-    }
-
-    // Ouverture du fichier pour check la taille du fichier (nombre d'octet)
-    FILE* fcheck = fopen(path,"rb");
-    if(!fcheck){
-        free(b_file);
-        return 1;
-    }
-    fseek(fcheck, 0, SEEK_END);
-    long size = ftell(fcheck);
-    fclose(fcheck);
-
-    // On détermine si on a besoin de padding si la taille du fichier est un mutiple de 16 
-    int padding;
-    if(size % 16 == 0){
-        padding = 16;
-
-        // On ajoute un state de padding entier si c'est un multiple
-        b_file = realloc(b_file, (NbState + 1) * sizeof(uint8_t[4][4]));
-        for(int ligne=0; ligne<4; ligne++){
-            for(int colonne=0; colonne<4; colonne++){
-                b_file[NbState][ligne][colonne] = 16;
-            }
-        }
-        NbState++;
-    }else{
-        padding = 16 - (size % 16);
-
-        for(int i = size % 16; i < 16; i++){
-            int colonne = i / 4;
-            int ligne = i % 4;
-            b_file[NbState-1][ligne][colonne] = (uint8_t)padding;
-        }
-    }
-
-    // Ecriture du fichier encryptée 
-    FILE* file = fopen(path,"wb");
-    if(!file){
-        free(b_file);
-        return 1;
-    }
-
-    uint8_t buffeur_state[4][4];
-    for(int i=0;i<NbState;i++){
-        memcpy(buffeur_state, b_file[i], sizeof(buffeur_state));
-        AES_Encrypt_State(buffeur_state,key);
-
-        for(int colonne = 0; colonne < 4; colonne++){
-            for(int ligne = 0; ligne < 4; ligne++){
-                fwrite(&buffeur_state[ligne][colonne], 1, 1, file);
-            }
-        }
-    }
-
-    fclose(file);
-    free(b_file);
-    return 0;
-}
-
-int AES_Decrypt_File(char* path,uint8_t key[32]){
-    uint8_t (*b_file)[4][4] = NULL;
-    int NbState;
-
-    if(ByteTranscription(path,&NbState,&b_file) == 1){
-        return 1;
-    }
-
-    // On décrypte tout le fichier 
-    for(int i=0;i<NbState;i++){
-        AES_Decrypt_State(b_file[i], key);
-    }
-
-    // Le dernier state on le mes de cotée a cause du padding
-    // Rappel : Si NbState = 2 alors il y'a b_file[0] et b_file[1] et donc b_file[2] = OOM
-    uint8_t padding = b_file[NbState-1][3][3];
-    // Nombre d'Octet a écrire
-    long NombreOctet = (long)NbState * 16 - padding;
-
-    FILE* file = fopen(path,"wb");
-    if(!file){
-        free(b_file);
-        return 1;
-    }
-
-    // On suis le nombre d'octet écrit pour le padding 
-    long indexOctet = 0;
-    for(int i=0;i<NbState;i++){
-        for(int colonne = 0; colonne < 4; colonne++){
-            for(int ligne = 0; ligne < 4; ligne++){
-                if(indexOctet < NombreOctet){
-                    fwrite(&b_file[i][ligne][colonne], 1, 1, file);
-                    indexOctet++;
-                }
-            }
-        }
-    }
-
-    fclose(file);
-    free(b_file);
-    return 0;
-}
-
-//////////////////////////////////////////////////////////
-
 void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],int compteur){
     uint8_t buffer[16];
     memcpy(buffer, nonce, 12);
@@ -604,7 +445,7 @@ void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]){
 }
 
 int AES_GCM_Encrypt_File(char* path,char* password){
-    // GENERATION DE LA NONCE
+    // GENERATION DE LA NONCE ET DU SEL
     FILE *f = fopen("/dev/urandom", "rb");
     if(f == NULL){
         return 1;
@@ -669,8 +510,21 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         free(tmpPath);
         return 1;
     }
-    fwrite(salt,  1, 16, file_out);   // → octets 0 à 15 du fichier
-    fwrite(nonce, 1, 12, file_out);   // → octets 16 à 27
+    if(fwrite(salt, 1, 16, file_out) != 16){
+        fclose(file_out);
+        fclose(file_in);
+        remove(tmpPath);
+        free(tmpPath);
+        return 1;
+    }
+
+    if(fwrite(nonce, 1, 12, file_out) != 12){
+        fclose(file_out);
+        fclose(file_in);
+        remove(tmpPath);
+        free(tmpPath);
+        return 1;
+    }
 
 
     // Création de la clé dérivée H (AES de 16 octets à 0)
@@ -693,7 +547,25 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     uint8_t accumulateur[16] = {0x00};
     for(int state=0;state<NbState;state++){
         memset(plaintextState, 0, 16);
-        int bytes_read = fread(plaintextState, 1, 16, file_in);
+
+        /* Octets à lire : 16, ou ce qui reste au dernier morceau.
+         * Si fread en lit moins (erreur de lecture, fichier raccourci pendant
+         * le chiffrement), le chiffré serait plus court que filesize, que le
+         * morceau "longueur" utilise : le fichier ne se déchiffrerait jamais.
+         */
+        long reste = filesize - (long)state * 16;
+        size_t attendu = 16;
+        if(reste < 16){
+            attendu = reste;
+        }
+        size_t bytes_read = fread(plaintextState, 1, attendu, file_in);
+        if(bytes_read != attendu){
+            fclose(file_out);
+            fclose(file_in);
+            remove(tmpPath);
+            free(tmpPath);
+            return 1;
+        }
 
         // Chiffrer en CTR
         uint8_t CompteurBlockState[4][4];
@@ -702,7 +574,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
 
         // Création du ciphertext
         uint8_t ciphertextState[16] = {0};
-        int index = 0;
+        size_t index = 0;
         for(int colonne = 0; colonne < 4; colonne++){
             for(int ligne = 0; ligne < 4; ligne++){
                 if(index < bytes_read){
@@ -720,7 +592,13 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         gf128_multiply(temp,accumulateur,zeroEncrypted);
         memcpy(accumulateur,temp,16);
 
-        fwrite(ciphertextState, 1, bytes_read, file_out);
+        if(fwrite(ciphertextState, 1, bytes_read, file_out) != bytes_read){
+            fclose(file_out);
+            fclose(file_in);
+            remove(tmpPath);
+            free(tmpPath);
+            return 1;
+        }
     }
 
     /* MORCEAU "LONGUEUR"
@@ -779,9 +657,21 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         }
     }
 
-    fwrite(accumulateur, 1, 16, file_out);
+    if(fwrite(accumulateur, 1, 16, file_out) != 16){
+        fclose(file_out);
+        fclose(file_in);
+        remove(tmpPath);
+        free(tmpPath);
+        return 1;
+    }
 
-    fclose(file_out);
+    // Même en cas d'échec, fclose a fermé file_out : on ne le referme pas
+    if(fclose(file_out) != 0){
+        fclose(file_in);
+        remove(tmpPath);
+        free(tmpPath);
+        return 1;
+    }
     fclose(file_in);
 
     if(rename(tmpPath, path) != 0){
@@ -858,7 +748,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
             // Lecture du ciphertext
             uint8_t ciphertextState[16] = {0};
             long reste = tailleChiffre - (long)state * 16;   // octets qu'il reste à lire
-            int taille = 16;
+            size_t taille = 16;
             if(reste < 16){
                 taille = reste;
             }
@@ -943,7 +833,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         // Lecture du ciphertext
         uint8_t ciphertextState[16] = {0};
         long reste = tailleChiffre - (long)state * 16;   // octets qu'il reste à lire
-        int taille = 16;
+        size_t taille = 16;
         if(reste < 16){
             taille = reste;
         }
@@ -971,7 +861,17 @@ int AES_GCM_Decrypt_File(char* path,char* password){
             }
         }
 
-        fwrite(plaintextState, 1, taille, file_write);
+        /* Disque plein : le .tmp serait incomplet, mais la 2e vérification du
+         * tag passerait quand même (elle porte sur ce qui a été LU) et le
+         * rename remplacerait le fichier chiffré par un texte tronqué.
+         */
+        if(fwrite(plaintextState, 1, taille, file_write) != taille){
+            fclose(file_write);
+            fclose(fileInfo);
+            remove(tmpPath);
+            free(tmpPath);
+            return 1;
+        }
     }
 
 
@@ -1027,7 +927,12 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     }
 
     fclose(fileInfo);
-    fclose(file_write);
+    // fclose écrit ce qui reste dans le tampon : c'est souvent là que "disque plein" arrive
+    if(fclose(file_write) != 0){
+        remove(tmpPath);
+        free(tmpPath);
+        return 1;
+    }
 
     if(rename(tmpPath, path) != 0){
         remove(tmpPath);
@@ -1035,6 +940,386 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         return 1;
     }
     free(tmpPath);
+    return 0;
+}
+
+int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_src,char* password){
+    if(src == NULL || password == NULL){
+        return 1;
+    }
+    // *dest doit valoir NULL : sinon le calloc écraserait l'adresse d'un buffer déjà alloué
+    if(dest == NULL || *dest != NULL || size_dest == NULL){
+        return 1;
+    }
+
+    // GENERATION DE LA NONCE ET DU SEL
+    FILE *f = fopen("/dev/urandom", "rb");
+    if(f == NULL){
+        return 1;
+    }
+
+    uint8_t nonce[12];
+    if(fread(nonce, sizeof(uint8_t), 12, f) != 12){
+        fclose(f);
+        return 1;
+    }
+    uint8_t salt[16];
+    if(fread(salt,sizeof(uint8_t), 16, f) != 16){
+        fclose(f);
+        return 1;
+    }
+    fclose(f);
+
+    // CREATION DE LA CLE AVEC PBKDF2
+    uint8_t key[32];
+    size_t size_password = strlen(password);
+    if(PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS) == 1){
+        return 1;
+    }
+
+    // LECTURE DU SOURCE
+    int NbState = (size_src + 15) / 16;
+    *dest = calloc(size_src + 44,sizeof(uint8_t));
+    if((*dest) == NULL){
+        return 1;
+    }
+
+    size_t index_write = 0;
+    // Ecriture du salt
+    for(size_t i = 0;i<16;i++){
+        (*dest)[index_write] = salt[i];
+        index_write++;
+    }
+    // Ecriture de la nonce
+    for(size_t i = 0;i<12;i++){
+        (*dest)[index_write] = nonce[i];
+        index_write++;
+    }
+
+    // Création de la clé dérivée H (AES de 16 octets à 0)
+    uint8_t bufferStateH[4][4];
+    memset(bufferStateH, 0, 16);
+    AES_Encrypt_State(bufferStateH, key);
+
+    // La sortie d'AES se lit colonne par colonne, comme le ciphertext.
+    // (un memcpy la lirait ligne par ligne : H serait dans le désordre)
+    uint8_t zeroEncrypted[16];
+    int indexH = 0;
+    for(int colonne = 0; colonne < 4; colonne++){
+        for(int ligne = 0; ligne < 4; ligne++){
+            zeroEncrypted[indexH] = bufferStateH[ligne][colonne];
+            indexH++;
+        }
+    }
+
+    uint8_t plaintextState[16];
+    uint8_t accumulateur[16] = {0x00};
+    size_t index_read = 0;
+    for(int state=0;state<NbState;state++){
+        // vérification de byte restant
+        size_t bytes_read = 16;
+        if(size_src - index_read < 16){
+            bytes_read = size_src - index_read;
+        }
+
+        memset(plaintextState, 0, 16);
+        for(size_t i = 0; i < bytes_read; i++){
+            plaintextState[i] = src[index_read];
+            index_read++;
+        }
+
+        // Chiffrer en CTR
+        uint8_t CompteurBlockState[4][4];
+        ConterBlockGenerator(CompteurBlockState, nonce, state + 2);
+        AES_Encrypt_State(CompteurBlockState, key);
+
+        // Création du ciphertext
+        uint8_t ciphertextState[16] = {0};
+        size_t index = 0;
+        for(int colonne = 0; colonne < 4; colonne++){
+            for(int ligne = 0; ligne < 4; ligne++){
+                if(index < bytes_read){
+                    ciphertextState[index] = plaintextState[index] ^ CompteurBlockState[ligne][colonne];
+                }
+                index++;
+            }
+        }
+
+        // GHASH
+        for(int i = 0; i < 16; i++){
+            accumulateur[i] ^= ciphertextState[i];
+        }
+        uint8_t temp[16];
+        gf128_multiply(temp,accumulateur,zeroEncrypted);
+        memcpy(accumulateur,temp,16);
+        
+        for(size_t i = 0; i < bytes_read;i++){
+            (*dest)[index_write] = ciphertextState[i];
+            index_write++;
+        }
+    }
+
+    uint8_t blocLongueur[16] = {0};
+    uint64_t bits = (uint64_t)size_src * 8;
+    for(int i = 0; i < 8; i++){
+        blocLongueur[15 - i] = (bits >> (8 * i)) & 0xff;
+    }
+
+    // On l'ajoute à la signature, exactement comme les autres morceaux
+    for(int i = 0; i < 16; i++){
+        accumulateur[i] ^= blocLongueur[i];
+    }
+    uint8_t temp[16];
+    gf128_multiply(temp, accumulateur, zeroEncrypted);
+    memcpy(accumulateur, temp, 16);
+
+    uint8_t masqueTag[4][4];
+    ConterBlockGenerator(masqueTag, nonce, 1);
+    AES_Encrypt_State(masqueTag, key);
+
+    // Le masque est une matrice rangée colonne par colonne :
+    // on la lit dans le même ordre que pour le ciphertext
+    int index = 0;
+    for(int colonne = 0; colonne < 4; colonne++){
+        for(int ligne = 0; ligne < 4; ligne++){
+            accumulateur[index] ^= masqueTag[ligne][colonne];
+            index++;
+        }
+    }
+
+    for(size_t i = 0;i<16;i++){
+        (*dest)[index_write] = accumulateur[i];
+        index_write++;
+    }
+
+    *size_dest = index_write;
+
+    return 0;
+}
+
+
+
+int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_src,char* password){
+    if(src == NULL || password == NULL){
+        return 1;
+    }
+    // *dest doit valoir NULL : sinon le calloc écraserait l'adresse d'un buffer déjà alloué
+    if(dest == NULL || *dest != NULL || size_dest == NULL){
+        return 1;
+    }
+
+    if(size_src < 44){
+        return 1;
+    }
+
+    long tailleChiffre = size_src - 16 - 12 - 16;
+    if(tailleChiffre < 0){
+        return 1;
+    }
+    int NbState = (tailleChiffre + 15) / 16;
+
+    size_t index_read = 0;
+    size_t index_write = 0;
+
+    // RECUPERATION DU SEL
+    uint8_t salt[16];
+    for(size_t i=0;i<16;i++){
+        salt[i] = src[index_read];
+        index_read++;
+    }
+
+    // RECUPERATION DE LA NONCE
+    uint8_t nonce[12];
+    for(size_t i=0;i<12;i++){
+        nonce[i] = src[index_read];
+        index_read++;
+    }
+
+    // FABRICATION DE LA CLE
+    uint8_t key[32];
+    size_t size_password = strlen(password);
+    if(PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS) == 1){
+        return 1;
+    }
+
+    // Création de la clé dérivée H (AES de 16 octets à 0)
+    uint8_t bufferStateH[4][4];
+    memset(bufferStateH, 0, 16);
+    AES_Encrypt_State(bufferStateH, key);
+
+    // La sortie d'AES se lit colonne par colonne, comme le ciphertext.
+    // (un memcpy la lirait ligne par ligne : H serait dans le désordre)
+    uint8_t zeroEncrypted[16];
+    int indexH = 0;
+    for(int colonne = 0; colonne < 4; colonne++){
+        for(int ligne = 0; ligne < 4; ligne++){
+            zeroEncrypted[indexH] = bufferStateH[ligne][colonne];
+            indexH++;
+        }
+    }
+
+    {
+        uint8_t NewAccumulateur[16] = {0x00};
+        for(int state=0;state<NbState;state++){
+            // Lecture du ciphertext
+            uint8_t ciphertextState[16] = {0};
+            long reste = tailleChiffre - (long)state * 16;   // octets qu'il reste à lire
+            size_t taille = 16;
+            if(reste < 16){
+                taille = reste;
+            }
+
+            for(size_t i=0;i<taille;i++){
+                ciphertextState[i] = src[index_read];
+                index_read++;
+            }
+
+            // GHASH
+            for(int i = 0; i < 16; i++){
+                NewAccumulateur[i] ^= ciphertextState[i];
+            }
+            uint8_t temp[16];
+            gf128_multiply(temp,NewAccumulateur,zeroEncrypted);
+            memcpy(NewAccumulateur,temp,16);
+        }
+
+        // MORCEAU "LONGUEUR" (une seule fois, après tous les morceaux)
+        uint8_t blocLongueur[16] = {0};
+        uint64_t bits = (uint64_t)tailleChiffre * 8;
+        for(int i = 0; i < 8; i++){
+            blocLongueur[15 - i] = (bits >> (8 * i)) & 0xff;
+        }
+        for(int i = 0; i < 16; i++){
+            NewAccumulateur[i] ^= blocLongueur[i];
+        }
+        uint8_t temp[16];
+        gf128_multiply(temp, NewAccumulateur, zeroEncrypted);
+        memcpy(NewAccumulateur, temp, 16);
+
+        // MASQUE N°1
+        uint8_t masqueTag[4][4];
+        ConterBlockGenerator(masqueTag, nonce, 1);
+        AES_Encrypt_State(masqueTag, key);
+
+        int index = 0;
+        for(int colonne = 0; colonne < 4; colonne++){
+            for(int ligne = 0; ligne < 4; ligne++){
+                NewAccumulateur[index] ^= masqueTag[ligne][colonne];
+                index++;
+            }
+        }
+
+        // RECUPERATION DU tag et comparaison
+        uint8_t tag[16];
+        for(size_t i=0;i<16;i++){
+            tag[i] = src[index_read];
+            index_read++;
+        }
+
+        for(int i = 0; i < 16; i++){
+            if(tag[i] != NewAccumulateur[i]){
+                return 2;
+            }
+        }
+    }
+
+    index_read = 28;
+    
+    *dest = calloc((size_src - 44) + 1,sizeof(uint8_t));
+    if((*dest) == NULL){
+        return 1;
+    }
+
+    uint8_t plaintextState[16];
+    uint8_t accumulateur[16] = {0x00};
+    for(int state=0;state<NbState;state++){
+        // Lecture du ciphertext
+        uint8_t ciphertextState[16] = {0};
+        long reste = tailleChiffre - (long)state * 16;   // octets qu'il reste à lire
+        size_t taille = 16;
+        if(reste < 16){
+            taille = reste;
+        }
+        for(size_t i=0;i<taille;i++){
+            ciphertextState[i] = src[index_read];
+            index_read++;
+        }
+
+        // GHASH
+        for(int i = 0; i < 16; i++){
+            accumulateur[i] ^= ciphertextState[i];
+        }
+        uint8_t temp[16];
+        gf128_multiply(temp,accumulateur,zeroEncrypted);
+        memcpy(accumulateur,temp,16);
+
+        // Dechiffrement en CTR
+        uint8_t CompteurBlockState[4][4];
+        ConterBlockGenerator(CompteurBlockState, nonce, state + 2);
+        AES_Encrypt_State(CompteurBlockState, key);
+
+        // Récupération du plaintext
+        int index = 0;
+        for(int colonne = 0; colonne < 4; colonne++){
+            for(int ligne = 0; ligne < 4; ligne++){
+                plaintextState[index] = ciphertextState[index] ^ CompteurBlockState[ligne][colonne];
+                index++;
+            }
+        }
+
+        for(size_t i=0;i<taille;i++){
+            (*dest)[index_write] = plaintextState[i];
+            index_write++;
+        }
+    }
+
+    uint8_t blocLongueur[16] = {0};
+    uint64_t bits = (uint64_t)tailleChiffre * 8;
+    for(int i = 0; i < 8; i++){
+        blocLongueur[15 - i] = (bits >> (8 * i)) & 0xff;
+    }
+
+    // On l'ajoute à la signature, exactement comme les autres morceaux
+    for(int i = 0; i < 16; i++){
+        accumulateur[i] ^= blocLongueur[i];
+    }
+    uint8_t temp[16];
+    gf128_multiply(temp, accumulateur, zeroEncrypted);
+    memcpy(accumulateur, temp, 16);
+
+    /* MASQUE N°1 : même calcul qu'au chiffrement
+     * (explication complète dans AES_GCM_Encrypt_File).
+     */
+    uint8_t masqueTag[4][4];
+    ConterBlockGenerator(masqueTag, nonce, 1);
+    AES_Encrypt_State(masqueTag, key);
+
+    int index = 0;
+    for(int colonne = 0; colonne < 4; colonne++){
+        for(int ligne = 0; ligne < 4; ligne++){
+            accumulateur[index] ^= masqueTag[ligne][colonne];
+            index++;
+        }
+    }
+
+    // RECUPERATION DU tag
+    uint8_t tag[16];
+    for(size_t i=0;i<16;i++){
+        tag[i] = src[index_read];
+        index_read++;
+    }
+
+    // Vérification de l'intégritée du fichier 
+    for(int i = 0; i < 16; i++){
+        if(tag[i] != accumulateur[i]){
+            free(*dest);
+            *dest = NULL;
+            return 2;  // Authentification échouée
+        }
+    }
+
+    *size_dest = index_write;
+
     return 0;
 }
 
@@ -1090,72 +1375,10 @@ int padding(uint8_t** dest,uint8_t* mess,size_t* size){
     return 0;
 }
 
-uint32_t ROTR(uint32_t num, size_t numberOfPush){
-    uint32_t bit;
-    for(size_t i = 0; i < numberOfPush; i++){
-        // On sauvegarde le bit tout a droite
-        bit = num << 31;
-        // On décale les bit a droite de num
-        num = num >> 1;
-        // On Xor les deux
-        num = num ^ bit;
-    }
-    return num;
-}
-
-uint32_t choose(uint32_t x, uint32_t y, uint32_t z){
-    uint32_t bit;
-    uint32_t res = 0;
-    for(size_t i = 0; i < 32; i++){
-        // On sauvegarde le bit x
-        bit = x << i;
-        bit = bit >> 31;
-        if(bit == 1){
-            // x vaut 1 : on sauvegarde le bit y
-            bit = y << i;
-            bit = bit >> 31;
-        }else{
-            // x vaut 0 : on sauvegarde le bit z
-            bit = z << i;
-            bit = bit >> 31;
-        }
-        // On le replace a la bonne place
-        bit = bit << (31 - i);
-
-        res = res ^ bit;
-    }
-    return res;
-}
-
-uint32_t majority(uint32_t x, uint32_t y, uint32_t z){
-    uint32_t bit;
-    int buffer;
-    uint32_t res = 0;
-    for(size_t i = 0; i < 32; i++){
-        // On sauvegarde le bit x
-        bit = x << (31 - i);
-        bit = bit >> 31;
-        buffer = (int)bit;
-
-        // On sauvegarde le bit y
-        bit = y << (31 - i);
-        bit = bit >> 31;
-        buffer = buffer + (int)bit;
-
-        // On sauvegarde le bit z
-        bit = z << (31 - i);
-        bit = bit >> 31;
-        buffer = buffer + (int)bit;
-
-        // Si au moins 2 bits valent 1, on met un 1 en position i
-        if(buffer >= 2){
-            bit = (uint32_t)1;
-            bit = bit << i;
-            res = res ^ bit;
-        }
-    }
-    return res;
-}
+// Accélération (Claude)
+uint32_t ROTR(uint32_t num, size_t n){ return (num >> n) | (num << (32 - n)); }
+uint32_t choose(uint32_t x, uint32_t y, uint32_t z){ return (x & y) ^ (~x & z); }
+uint32_t majority(uint32_t x, uint32_t y, uint32_t z){ return (x & y) ^ (x & z) ^ (y & z); }
 
 uint32_t SIG0(uint32_t x){
     uint32_t morceau1 = ROTR(x, 2);
