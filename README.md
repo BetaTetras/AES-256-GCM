@@ -111,7 +111,7 @@ aescli.exe dechiffrer note.txt "mon mot de passe"
 - **Linux, macOS, BSD** : tout système POSIX fournissant `/dev/urandom`.
 - **Windows** : avec MinGW-w64. Le code compile sans avertissement (`-Wall -Wextra -pedantic`), mais n'a **pas encore été testé sur une machine Windows**. Visual Studio (MSVC) n'a pas été essayé.
 
-Les différences entre systèmes sont isolées dans des blocs `#ifdef _WIN32` de `AES.c` : source de hasard, remplacement du fichier (`rename` / `MoveFileExA`) et copie des droits d'accès (Linux, macOS, BSD seulement).
+Les différences entre systèmes sont isolées dans des blocs `#ifdef _WIN32` de `AES.c` : source de hasard, lecture de la taille du fichier (`ftell` / `_ftelli64`, car un `long` ne fait que 32 bits sous Windows), remplacement du fichier (`rename` / `MoveFileExA`) et copie des droits d'accès (Linux, macOS, BSD seulement).
 
 ---
 
@@ -132,7 +132,7 @@ int AES_GCM_Decrypt_File(char* path, char* password);
 | Code retour | `AES_GCM_Encrypt_File` | `AES_GCM_Decrypt_File` |
 |:-----------:|------------------------|------------------------|
 | `0` | Succès | Succès |
-| `1` | Erreur : générateur aléatoire indisponible, fichier introuvable, taille illisible ou fichier trop gros (voir [Limites connues](#limites-connues)), ouverture, lecture, écriture (disque plein), allocation, renommage. L'original est intact. | Erreur : fichier introuvable, fichier de moins de 44 octets, ouverture, écriture (disque plein), allocation, renommage. L'original est intact. |
+| `1` | Erreur : générateur aléatoire indisponible, fichier introuvable, taille illisible ou fichier trop gros (voir [Limites connues](#limites-connues)), ouverture, lecture, écriture (disque plein), allocation, renommage. L'original est intact. | Erreur : fichier introuvable, fichier de moins de 44 octets ou trop gros, ouverture, écriture (disque plein), allocation, renommage. L'original est intact. |
 | `2` | — | **Échec d'authentification** : mauvais mot de passe *ou* fichier modifié. Le fichier n'est pas touché. |
 
 Un mauvais mot de passe et un fichier altéré donnent tous deux `2` : les deux cas sont indiscernables par construction.
@@ -156,7 +156,7 @@ int AES_GCM_Decrypt(uint8_t** dest, size_t* size_dest, uint8_t* src, size_t size
 | Code retour | `AES_GCM_Encrypt` | `AES_GCM_Decrypt` |
 |:-----------:|-------------------|-------------------|
 | `0` | Succès | Succès |
-| `1` | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, générateur aléatoire indisponible, allocation | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, moins de 44 octets, allocation |
+| `1` | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, données trop grosses (voir [Limites connues](#limites-connues)), générateur aléatoire indisponible, allocation | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, moins de 44 octets ou trop gros, allocation |
 | `2` | — | **Échec d'authentification** : mauvais mot de passe *ou* données modifiées. `*dest` reste `NULL`. |
 
 - Le résultat de `AES_GCM_Encrypt` a exactement le format d'un fichier chiffré : on peut l'écrire tel quel dans un fichier et le relire avec `AES_GCM_Decrypt_File`, et inversement.
@@ -267,6 +267,7 @@ Tag       = S ⊕ AES-256(K, nonce ‖ 00 00 00 01)
 | Taille du sel | 16 octets | `AES_GCM_*` |
 | Taille de la nonce | 12 octets (96 bits) | `AES_GCM_*` |
 | Taille du tag | 16 octets (128 bits) | `AES_GCM_*` |
+| Taille maximale des données | 68 719 476 704 octets (≈ 64 Gio) | `#define GCM_TAILLE_MAX` |
 | Données associées (AAD) | non prises en charge | — |
 
 ---
@@ -283,6 +284,7 @@ Chaque composant a été testé contre les vecteurs de test officiels :
 | PBKDF2-HMAC-SHA256 | `"password"` / `"salt"`, 1 et 4 096 itérations | ✅ |
 | Texte chiffré GCM (flux CTR) | NIST GCM, cas de test 14 | ✅ |
 | Multiplication GF(2¹²⁸) (GHASH) | NIST GCM, cas de test 2 | ✅ |
+| Blocs compteur au-delà de 2³¹ (jusqu'à 4 294 967 295) | Comparaison avec AES-ECB (Python `cryptography`) | ✅ |
 | Fichier complet (sel, nonce, chiffré, tag) | Comparaison avec `AESGCM` (Python `cryptography`), dans les deux sens, fichiers de 0 à 70 000 octets | ✅ |
 | Données chiffrées en mémoire | Comparaison avec `AESGCM` (Python `cryptography`), dans les deux sens, de 0 à 1 000 octets | ✅ |
 
@@ -297,7 +299,8 @@ Tests sur fichiers (aller-retour chiffrement → déchiffrement) :
 | Disque plein (simulé avec `ulimit -f`) pendant le chiffrement ou le déchiffrement → code `1`, original intact, pas de `.tmp` | ✅ |
 | Fichier en `600` → toujours `600` après chiffrement et déchiffrement | ✅ |
 | Taille illisible (`ftell` renvoie `-1`, simulé avec un tube nommé) → code `1`, rien n'est modifié | ✅ |
-| Fichier de 33 Go (fichier creux) → code `1`, intact ; la plus grande taille autorisée (34 359 738 319 octets) est acceptée | ✅ |
+| Fichier d'un octet de plus que la taille maximale (68 719 476 705 octets, fichier creux) → code `1`, intact, pas de `.tmp` ; la taille maximale (68 719 476 704 octets) est acceptée | ✅ |
+| Fichier chiffré plus gros que la taille maximale + 44 octets → code `1` au déchiffrement, intact | ✅ |
 
 Tests en mémoire :
 
@@ -307,6 +310,7 @@ Tests en mémoire :
 | Mauvais mot de passe → code `2`, `*dest` reste `NULL` | ✅ |
 | Chaque octet des données chiffrées modifié un par un → code `2` | ✅ |
 | Moins de 44 octets, paramètre `NULL` ou `*dest` déjà rempli → code `1` | ✅ |
+| Taille annoncée plus grande que la taille maximale (avec un petit buffer) → code `1` avant toute lecture, `*dest` reste `NULL` | ✅ |
 | Données chiffrées en mémoire, écrites dans un fichier, puis relues par `AES_GCM_Decrypt_File` | ✅ |
 | Aucune copie de la clé dans la pile après `AES_GCM_Encrypt` (vérifié en `-O0` et `-O2`) | ✅ |
 
@@ -356,8 +360,8 @@ Le code privilégie la lisibilité sur la vitesse :
 **Robustesse**
 
 - Un fichier `<fichier>.tmp` déjà présent est écrasé sans avertissement.
-- Taille maximale d'un fichier : un peu moins de 32 Gio (compteur de blocs en `int`), et un peu moins de 2 Gio sous Windows (`long` de 32 bits pour `ftell`). Au-delà, `AES_GCM_Encrypt_File` refuse le fichier (code `1`) sans le modifier.
-- `AES_GCM_Encrypt` (en mémoire) ne fait pas encore ce contrôle de taille : ne pas lui donner plus de 32 Gio.
+- Taille maximale des données : 68 719 476 704 octets (≈ 64 Gio), pour un fichier comme en mémoire, sous Linux comme sous Windows. C'est la limite de GCM lui-même (NIST SP 800-38D) : le compteur ne fait que 32 bits, et au-delà les mêmes masques resserviraient. Les quatre fonctions `AES_GCM_*` refusent une taille plus grande (code `1`) sans rien modifier. Aller plus loin demanderait de découper les données en plusieurs messages GCM (nouveau format de fichier).
+- Aucun fichier de cette taille n'a été chiffré en entier pendant les tests (≈ 11 h de chiffrement et ≈ 19 h de déchiffrement sur Raspberry Pi 4, par extrapolation) : les limites ont été vérifiées sur des fichiers creux, et les blocs compteur au-delà de 2³¹ comparés à Python.
 - Les fonctions internes (`padding`, `compressing`, `push`, `pop`, `mul`…) sont globales et portent des noms génériques : conflit possible avec une autre bibliothèque liée au même programme. Les déclarer `static` réglerait le problème.
 
 **Windows** (comportement attendu, pas encore testé sur une machine Windows)

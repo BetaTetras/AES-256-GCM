@@ -2,7 +2,6 @@
 #include <stdint.h> 
 #include <stdlib.h>
 #include <string.h>
-#include <limits.h>     // INT_MAX et LONG_MAX
 #ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
@@ -61,6 +60,15 @@ static const uint8_t RCON[11] = {
 #define HASH_CONST {0x6a09e667,0xbb67ae85 ,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}
 #define PBKDF2_TOURS 600000
 
+/* GCM : taille maximale d'un message (NIST SP 800-38D), 68 719 476 704 octets (~64 Go).
+ * Le compteur de ConterBlockGenerator ne fait que 4 octets (0 à 4 294 967 295) :
+ *   - 0 n'est jamais utilisé, 1 sert au masque de la signature,
+ *   - 2 à 4 294 967 295 servent aux données : 4 294 967 294 morceaux de 16 octets.
+ * Au-delà, le compteur repartirait à 0 et les mêmes masques resserviraient :
+ * chiffré1 XOR chiffré2 = clair1 XOR clair2, et la signature deviendrait falsifiable.
+ */
+#define GCM_TAILLE_MAX ((uint64_t)(UINT32_MAX - 1) * 16)
+
 static const uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -109,7 +117,7 @@ int AES_SHA256(uint8_t* dest, uint8_t* mess, size_t size);
 int AES_HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t size_mess);
 int PBKDF2(uint8_t* dest,char* password,size_t size_password,uint8_t* salt,size_t size_salt,size_t tour);
 
-void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],int compteur);
+void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],uint32_t compteur);
 void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]);
 
 int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_src,char* password);
@@ -371,13 +379,12 @@ void AES_Decrypt_State(uint8_t state[4][4], uint8_t const cle[32]) {
 
 //////////////////////////////////////////////////////////
 
-void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],int compteur){
+void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],uint32_t compteur){
     uint8_t buffer[16];
     memcpy(buffer, nonce, 12);
 
     /* Pour transformée un nombre (compteur) en 4 octet pour la suite du code
-     * il faut extraire les 4 octet que constitue un int standare car un 
-     * int est en sois un uint32_t.
+     * il faut extraire les 4 octet que constitue le compteur (un uint32_t).
      * 
      * Pourquoi faire un décallage de x octete ( >> 24 ) :
      *  Compteur original:
@@ -464,31 +471,31 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     // GENERATION DE LA NONCE ET DU SEL
     uint8_t nonce[12];
     uint8_t salt[16];
-#ifdef _WIN32
-    /* Windows n'a pas de /dev/urandom : c'est BCryptGenRandom qui donne
-     * le hasard du système. Il renvoie 0 quand tout s'est bien passé. */
-    if(BCryptGenRandom(NULL, nonce, 12, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
-        return 1;
-    }
-    if(BCryptGenRandom(NULL, salt, 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
-        return 1;
-    }
-#else
-    FILE *f = fopen("/dev/urandom", "rb");
-    if(f == NULL){
-        return 1;
-    }
+    #ifdef _WIN32
+        /* Windows n'a pas de /dev/urandom : c'est BCryptGenRandom qui donne
+        * le hasard du système. Il renvoie 0 quand tout s'est bien passé. */
+        if(BCryptGenRandom(NULL, nonce, 12, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
+            return 1;
+        }
+        if(BCryptGenRandom(NULL, salt, 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
+            return 1;
+        }
+    #else
+        FILE *f = fopen("/dev/urandom", "rb");
+        if(f == NULL){
+            return 1;
+        }
 
-    if(fread(nonce, sizeof(uint8_t), 12, f) != 12){
+        if(fread(nonce, sizeof(uint8_t), 12, f) != 12){
+            fclose(f);
+            return 1;
+        }
+        if(fread(salt,sizeof(uint8_t), 16, f) != 16){
+            fclose(f);
+            return 1;
+        }
         fclose(f);
-        return 1;
-    }
-    if(fread(salt,sizeof(uint8_t), 16, f) != 16){
-        fclose(f);
-        return 1;
-    }
-    fclose(f);
-#endif
+    #endif
 
     // CREATION DE LA CLE AVEC PBKDF2
     uint8_t key[32];
@@ -504,31 +511,36 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         uint8_tToZero(key, 32);
         return 1;
     }
-    fseek(file_in, 0, SEEK_END);
-    long filesize = ftell(file_in);
-    /* ftell renvoie -1 quand il ne peut pas donner la taille. Exemple : sous
-     * Windows, un long ne fait que 32 bits, donc un fichier de 2 Go ou plus.
+    #ifdef _WIN32
+        /* Sous Windows, un long ne fait que 32 bits : ftell ne sait pas dépasser
+        * 2 Go et renvoie -1. _fseeki64/_ftelli64 font la même chose avec un
+        * long long (8 octets), comme le long de Linux. */
+        _fseeki64(file_in, 0, SEEK_END);
+        long long filesize = _ftelli64(file_in);
+    #else
+        fseek(file_in, 0, SEEK_END);
+        long long filesize = ftell(file_in);
+    #endif
+
+    /* ftell renvoie -1 quand il ne peut pas donner la taille. Exemple : un
+     * tube (FIFO), qui n'a pas de taille.
      * Sans ce test, NbState vaudrait 0 : rien ne serait lu, et le fichier
      * serait remplacé par 44 octets (sel + nonce + signature) sans les données.
      *
-     * Trop gros : NbState et le compteur de ConterBlockGenerator sont des int
-     * (2 147 483 647 au maximum). En morceaux de 16 octets, ça fait ~32 Go.
-     * Au-delà, NbState deviendrait négatif : même perte des données.
-     *   - filesize / 16 >= INT_MAX - 2 : le - 2 parce que le compteur vaut state + 2.
-     *     On divise filesize au lieu de calculer (filesize + 15) / 16, car
-     *     le + 15 pourrait lui-même dépasser.
-     *   - filesize > LONG_MAX - 15 : c'est justement ce + 15 de NbState. Sous
-     *     Windows, filesize peut aller jusqu'à LONG_MAX = 2 147 483 647, et
-     *     + 15 dépasserait.
+     * Trop gros : au-delà de GCM_TAILLE_MAX (~64 Go), le compteur de
+     * ConterBlockGenerator repartirait à 0 (voir la définition de GCM_TAILLE_MAX).
+     * Le (uint64_t) ne pose pas de problème : filesize n'est plus négatif ici.
      */
-    if(filesize < 0 || filesize > LONG_MAX - 15 || filesize / 16 >= INT_MAX - 2){
+
+    if(filesize < 0 || (uint64_t)filesize > GCM_TAILLE_MAX){
         fclose(file_in);
         uint8_tToZero(key, 32);
         return 1;
     }
     rewind(file_in);
 
-    int NbState = (filesize + 15) / 16;
+    // Au plus 4 294 967 294 morceaux : tient dans un uint32_t, comme le compteur
+    uint32_t NbState = (filesize + 15) / 16;
 
 
     // Path tempo
@@ -557,17 +569,17 @@ int AES_GCM_Encrypt_File(char* path,char* password){
      * « lecture seule ») : ce bloc n'est compilé que sous Linux (#ifndef = « si PAS
      * Windows »). Le .tmp, créé dans le même dossier, reçoit les droits du dossier.
      */
-#ifndef _WIN32
-    struct stat infos;
-    if(stat(path, &infos) != 0 || chmod(tmpPath, infos.st_mode & 0777) != 0){
-        fclose(file_out);
-        fclose(file_in);
-        remove(tmpPath);
-        free(tmpPath);
-        uint8_tToZero(key, 32);
-        return 1;
-    }
-#endif
+    #ifndef _WIN32
+        struct stat infos;
+        if(stat(path, &infos) != 0 || chmod(tmpPath, infos.st_mode & 0777) != 0){
+            fclose(file_out);
+            fclose(file_in);
+            remove(tmpPath);
+            free(tmpPath);
+            uint8_tToZero(key, 32);
+            return 1;
+        }
+    #endif
     if(fwrite(salt, 1, 16, file_out) != 16){
         fclose(file_out);
         fclose(file_in);
@@ -605,7 +617,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     
     uint8_t plaintextState[16];
     uint8_t accumulateur[16] = {0x00};
-    for(int state=0;state<NbState;state++){
+    for(uint32_t state=0;state<NbState;state++){
         memset(plaintextState, 0, 16);
 
         /* Octets à lire : 16, ou ce qui reste au dernier morceau.
@@ -613,7 +625,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
          * le chiffrement), le chiffré serait plus court que filesize, que le
          * morceau "longueur" utilise : le fichier ne se déchiffrerait jamais.
          */
-        long reste = filesize - (long)state * 16;
+        long long reste = filesize - (long long)state * 16;
         size_t attendu = 16;
         if(reste < 16){
             attendu = reste;
@@ -738,14 +750,14 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     }
     fclose(file_in);
 
-#ifdef _WIN32
-    /* Sous Windows, rename refuse d'écraser un fichier qui existe déjà.
-     * MoveFileExA avec MOVEFILE_REPLACE_EXISTING fait le même travail que
-     * le rename de Linux. Attention : il renvoie 0 quand ça RATE. */
-    if(MoveFileExA(tmpPath, path, MOVEFILE_REPLACE_EXISTING) == 0){
-#else
-    if(rename(tmpPath, path) != 0){
-#endif
+    #ifdef _WIN32
+        /* Sous Windows, rename refuse d'écraser un fichier qui existe déjà.
+        * MoveFileExA avec MOVEFILE_REPLACE_EXISTING fait le même travail que
+        * le rename de Linux. Attention : il renvoie 0 quand ça RATE. */
+        if(MoveFileExA(tmpPath, path, MOVEFILE_REPLACE_EXISTING) == 0){
+    #else
+        if(rename(tmpPath, path) != 0){
+    #endif
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
@@ -762,18 +774,24 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         return 1;
     }
 
-    // Déterminer la taille du fichier
-    fseek(fileInfo, 0, SEEK_END);
-    long filesize = ftell(fileInfo);
+    // Déterminer la taille du fichier (_ftelli64 sous Windows : voir AES_GCM_Encrypt_File)
+    #ifdef _WIN32
+        _fseeki64(fileInfo, 0, SEEK_END);
+        long long filesize = _ftelli64(fileInfo);
+    #else
+        fseek(fileInfo, 0, SEEK_END);
+        long long filesize = ftell(fileInfo);
+    #endif
     rewind(fileInfo);
 
     // 12 = nonce, 16 = salt, 16 = tag
-    long tailleChiffre = filesize - 16 - 12 - 16;
-    if(tailleChiffre < 0){
+    long long tailleChiffre = filesize - 16 - 12 - 16;
+    // Plus gros que GCM_TAILLE_MAX : aucun fichier chiffré valide ne peut l'être
+    if(tailleChiffre < 0 || (uint64_t)tailleChiffre > GCM_TAILLE_MAX){
         fclose(fileInfo);
         return 1;
     }
-    int NbState = (tailleChiffre + 15) / 16;
+    uint32_t NbState = (tailleChiffre + 15) / 16;
 
     // RECUPERATION DU SEL
     uint8_t salt[16];
@@ -818,10 +836,10 @@ int AES_GCM_Decrypt_File(char* path,char* password){
      */
     {
         uint8_t NewAccumulateur[16] = {0x00};
-        for(int state=0;state<NbState;state++){
+        for(uint32_t state=0;state<NbState;state++){
             // Lecture du ciphertext
             uint8_t ciphertextState[16] = {0};
-            long reste = tailleChiffre - (long)state * 16;   // octets qu'il reste à lire
+            long long reste = tailleChiffre - (long long)state * 16;   // octets qu'il reste à lire
             size_t taille = 16;
             if(reste < 16){
                 taille = reste;
@@ -913,10 +931,10 @@ int AES_GCM_Decrypt_File(char* path,char* password){
 
     uint8_t plaintextState[16];
     uint8_t accumulateur[16] = {0x00};
-    for(int state=0;state<NbState;state++){
+    for(uint32_t state=0;state<NbState;state++){
         // Lecture du ciphertext
         uint8_t ciphertextState[16] = {0};
-        long reste = tailleChiffre - (long)state * 16;   // octets qu'il reste à lire
+        long long reste = tailleChiffre - (long long)state * 16;   // octets qu'il reste à lire
         size_t taille = 16;
         if(reste < 16){
             taille = reste;
@@ -1048,6 +1066,10 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     if(dest == NULL || *dest != NULL || size_dest == NULL){
         return 1;
     }
+    // Trop gros : le compteur repartirait à 0 (voir GCM_TAILLE_MAX)
+    if((uint64_t)size_src > GCM_TAILLE_MAX){
+        return 1;
+    }
 
     // GENERATION DE LA NONCE ET DU SEL
     uint8_t nonce[12];
@@ -1086,7 +1108,7 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     }
 
     // LECTURE DU SOURCE
-    int NbState = (size_src + 15) / 16;
+    uint32_t NbState = (size_src + 15) / 16;
     *dest = calloc(size_src + 44,sizeof(uint8_t));
     if((*dest) == NULL){
         uint8_tToZero(key, 32);
@@ -1124,7 +1146,7 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     uint8_t plaintextState[16];
     uint8_t accumulateur[16] = {0x00};
     size_t index_read = 0;
-    for(int state=0;state<NbState;state++){
+    for(uint32_t state=0;state<NbState;state++){
         // vérification de byte restant
         size_t bytes_read = 16;
         if(size_src - index_read < 16){
@@ -1222,11 +1244,12 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         return 1;
     }
 
-    long tailleChiffre = size_src - 16 - 12 - 16;
-    if(tailleChiffre < 0){
+    long long tailleChiffre = size_src - 16 - 12 - 16;
+    // Plus gros que GCM_TAILLE_MAX : aucune donnée chiffrée valide ne peut l'être
+    if(tailleChiffre < 0 || (uint64_t)tailleChiffre > GCM_TAILLE_MAX){
         return 1;
     }
-    int NbState = (tailleChiffre + 15) / 16;
+    uint32_t NbState = (tailleChiffre + 15) / 16;
 
     size_t index_read = 0;
     size_t index_write = 0;
@@ -1271,10 +1294,10 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     {
         uint8_t NewAccumulateur[16] = {0x00};
-        for(int state=0;state<NbState;state++){
+        for(uint32_t state=0;state<NbState;state++){
             // Lecture du ciphertext
             uint8_t ciphertextState[16] = {0};
-            long reste = tailleChiffre - (long)state * 16;   // octets qu'il reste à lire
+            long long reste = tailleChiffre - (long long)state * 16;   // octets qu'il reste à lire
             size_t taille = 16;
             if(reste < 16){
                 taille = reste;
@@ -1348,10 +1371,10 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     uint8_t plaintextState[16];
     uint8_t accumulateur[16] = {0x00};
-    for(int state=0;state<NbState;state++){
+    for(uint32_t state=0;state<NbState;state++){
         // Lecture du ciphertext
         uint8_t ciphertextState[16] = {0};
-        long reste = tailleChiffre - (long)state * 16;   // octets qu'il reste à lire
+        long long reste = tailleChiffre - (long long)state * 16;   // octets qu'il reste à lire
         size_t taille = 16;
         if(reste < 16){
             taille = reste;
