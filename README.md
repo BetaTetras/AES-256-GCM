@@ -1,6 +1,6 @@
 # AES-256-GCM + PBKDF2 en C
 
-Bibliothèque C de chiffrement par mot de passe, de fichiers ou de données en mémoire, écrite entièrement à la main : AES-256, mode GCM (CTR + GHASH), SHA-256, HMAC-SHA256 et PBKDF2. Elle ne dépend que de la bibliothèque standard C.
+Bibliothèque C de chiffrement par mot de passe, de fichiers ou de données en mémoire, écrite entièrement à la main : AES-256, mode GCM (CTR + GHASH), SHA-256, HMAC-SHA256 et PBKDF2. Elle n'utilise aucune bibliothèque externe : seulement la bibliothèque standard C et quelques fonctions du système (hasard, droits et remplacement de fichiers).
 
 Un appel suffit pour chiffrer un fichier en place, ou un tampon en mémoire, avec un mot de passe ; le déchiffrement vérifie l'intégrité des données avant de rendre quoi que ce soit.
 
@@ -14,11 +14,11 @@ Un appel suffit pour chiffrer un fichier en place, ou un tampon en mémoire, ave
 - **AES-256** conforme à FIPS-197 (14 rondes, expansion de clé en 60 mots).
 - **Chiffrement authentifié AES-256-GCM** conforme à NIST SP 800-38D : chiffrement en mode compteur (CTR) et tag d'authentification de 16 octets. Les données chiffrées sont lisibles par toute autre implémentation GCM (voir [Compatibilité](#compatibilité)).
 - **Dérivation de clé PBKDF2-HMAC-SHA256** avec **600 000 itérations** (recommandation OWASP) : la clé de 32 octets est dérivée du mot de passe et d'un sel aléatoire.
-- **Sel et nonce aléatoires** tirés de `/dev/urandom` à chaque chiffrement : chiffrer deux fois les mêmes données avec le même mot de passe donne deux résultats différents.
+- **Sel et nonce aléatoires** tirés du générateur aléatoire du système (`/dev/urandom`, ou `BCryptGenRandom` sous Windows) à chaque chiffrement : chiffrer deux fois les mêmes données avec le même mot de passe donne deux résultats différents.
 - **Chiffrement de fichiers ou en mémoire** : `AES_GCM_Encrypt` / `AES_GCM_Decrypt` travaillent sur un tampon, sans rien écrire sur le disque, et produisent exactement le même format qu'un fichier chiffré.
 - **Pas de padding** : le texte chiffré a exactement la taille des données d'origine (+ 44 octets d'en-tête et de tag).
 - **Fichiers traités par blocs de 16 octets** : la mémoire utilisée reste constante, quelle que soit la taille du fichier.
-- **Écriture sûre** : le résultat est écrit dans `<fichier>.tmp` puis renommé. Chaque écriture est vérifiée : en cas de mauvais mot de passe, de fichier altéré ou de disque plein, le `.tmp` est supprimé et l'original reste intact. Le fichier garde ses droits d'accès (un fichier en `600` reste en `600`).
+- **Écriture sûre** : le résultat est écrit dans `<fichier>.tmp` puis renommé. Chaque écriture est vérifiée : en cas de mauvais mot de passe, de fichier altéré ou de disque plein, le `.tmp` est supprimé et l'original reste intact. Sous Linux, macOS et BSD, le fichier garde ses droits d'accès (un fichier en `600` reste en `600`) ; sous Windows, il prend ceux de son dossier. Un fichier trop gros, ou dont la taille ne peut pas être lue, est refusé sans être modifié.
 - **Hygiène mémoire** : la clé et ses copies (sous-clés AES) sont effacées avant chaque retour, avec une écriture `volatile` que le compilateur ne peut pas supprimer. Le tag est comparé en temps constant.
 
 ---
@@ -88,6 +88,8 @@ int main(int argc, char *argv[]) {
 
 ### 3. Compiler et lancer
 
+**Linux, macOS, BSD :**
+
 ```bash
 gcc -std=c11 -Wall -Wextra -O2 -o aescli main.c AES.c
 
@@ -95,7 +97,21 @@ gcc -std=c11 -Wall -Wextra -O2 -o aescli main.c AES.c
 ./aescli dechiffrer note.txt "mon mot de passe"
 ```
 
-**Plateformes :** Linux, macOS, BSD (tout système POSIX fournissant `/dev/urandom`). Windows natif n'est pas pris en charge.
+**Windows (MinGW-w64, par exemple avec MSYS2) :** ajouter `-lbcrypt`, la bibliothèque de Windows qui fournit `BCryptGenRandom` :
+
+```bat
+gcc -std=c11 -Wall -Wextra -O2 -o aescli.exe main.c AES.c -lbcrypt
+
+aescli.exe chiffrer   note.txt "mon mot de passe"
+aescli.exe dechiffrer note.txt "mon mot de passe"
+```
+
+**Plateformes :**
+
+- **Linux, macOS, BSD** : tout système POSIX fournissant `/dev/urandom`.
+- **Windows** : avec MinGW-w64. Le code compile sans avertissement (`-Wall -Wextra -pedantic`), mais n'a **pas encore été testé sur une machine Windows**. Visual Studio (MSVC) n'a pas été essayé.
+
+Les différences entre systèmes sont isolées dans des blocs `#ifdef _WIN32` de `AES.c` : source de hasard, remplacement du fichier (`rename` / `MoveFileExA`) et copie des droits d'accès (Linux, macOS, BSD seulement).
 
 ---
 
@@ -116,7 +132,7 @@ int AES_GCM_Decrypt_File(char* path, char* password);
 | Code retour | `AES_GCM_Encrypt_File` | `AES_GCM_Decrypt_File` |
 |:-----------:|------------------------|------------------------|
 | `0` | Succès | Succès |
-| `1` | Erreur : `/dev/urandom` illisible, fichier introuvable, ouverture, lecture, écriture (disque plein), allocation, renommage. L'original est intact. | Erreur : fichier introuvable, fichier de moins de 44 octets, ouverture, écriture (disque plein), allocation, renommage. L'original est intact. |
+| `1` | Erreur : générateur aléatoire indisponible, fichier introuvable, taille illisible ou fichier trop gros (voir [Limites connues](#limites-connues)), ouverture, lecture, écriture (disque plein), allocation, renommage. L'original est intact. | Erreur : fichier introuvable, fichier de moins de 44 octets, ouverture, écriture (disque plein), allocation, renommage. L'original est intact. |
 | `2` | — | **Échec d'authentification** : mauvais mot de passe *ou* fichier modifié. Le fichier n'est pas touché. |
 
 Un mauvais mot de passe et un fichier altéré donnent tous deux `2` : les deux cas sont indiscernables par construction.
@@ -140,7 +156,7 @@ int AES_GCM_Decrypt(uint8_t** dest, size_t* size_dest, uint8_t* src, size_t size
 | Code retour | `AES_GCM_Encrypt` | `AES_GCM_Decrypt` |
 |:-----------:|-------------------|-------------------|
 | `0` | Succès | Succès |
-| `1` | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, `/dev/urandom` illisible, allocation | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, moins de 44 octets, allocation |
+| `1` | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, générateur aléatoire indisponible, allocation | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, moins de 44 octets, allocation |
 | `2` | — | **Échec d'authentification** : mauvais mot de passe *ou* données modifiées. `*dest` reste `NULL`. |
 
 - Le résultat de `AES_GCM_Encrypt` a exactement le format d'un fichier chiffré : on peut l'écrire tel quel dans un fichier et le relire avec `AES_GCM_Decrypt_File`, et inversement.
@@ -229,6 +245,7 @@ Tag       = S ⊕ AES-256(K, nonce ‖ 00 00 00 01)
 - Le **masque** `AES(K, nonce ‖ 1)` lie le tag à la nonce et cache la valeur de GHASH, donc de H.
 - La **multiplication dans GF(2¹²⁸)** suit la convention de GCM : bits rangés à l'envers, décalage vers la droite et réduction par `0xE1` sur le premier octet (SP 800-38D, § 6.3).
 - La **comparaison du tag** parcourt toujours les 16 octets et cumule les différences (`diff |= a ^ b`) sans branchement : sa durée ne dépend pas du nombre d'octets corrects.
+- **PBKDF2** : à chaque itération, HMAC hache `clé ⊕ ipad` et `clé ⊕ opad`, deux blocs qui ne dépendent que du mot de passe. Leur compression SHA-256 est donc calculée une seule fois au début : chaque itération ne fait plus que 2 compressions au lieu de 4.
 
 ### Organisation du code
 
@@ -279,6 +296,8 @@ Tests sur fichiers (aller-retour chiffrement → déchiffrement) :
 | Fichier de moins de 44 octets → code `1` | ✅ |
 | Disque plein (simulé avec `ulimit -f`) pendant le chiffrement ou le déchiffrement → code `1`, original intact, pas de `.tmp` | ✅ |
 | Fichier en `600` → toujours `600` après chiffrement et déchiffrement | ✅ |
+| Taille illisible (`ftell` renvoie `-1`, simulé avec un tube nommé) → code `1`, rien n'est modifié | ✅ |
+| Fichier de 33 Go (fichier creux) → code `1`, intact ; la plus grande taille autorisée (34 359 738 319 octets) est acceptée | ✅ |
 
 Tests en mémoire :
 
@@ -293,11 +312,15 @@ Tests en mémoire :
 
 Tous les scénarios passent sous `valgrind` sans erreur ni fuite mémoire.
 
+**Windows :** `AES.c` et l'exemple ci-dessus compilent avec MinGW-w64 (x86_64) sans avertissement (`-Wall -Wextra -pedantic`). Les tests ci-dessus n'ont pas encore été lancés sous Windows.
+
 ### Compatibilité
 
 Le format suit la norme AES-256-GCM : avec la clé PBKDF2 (même mot de passe, même sel, 600 000 itérations), n'importe quelle implémentation GCM conforme peut déchiffrer les données, et inversement.
 
-**Fichiers chiffrés avec la V4 :** même format, mais avec 13 000 itérations PBKDF2. La V5 les refuse (code `2`, fichier intact) : les déchiffrer avec la V4, puis les rechiffrer avec la V5.
+**Fichiers chiffrés avec la V5 :** même format et même dérivation de clé. La V6 lit les fichiers de la V5, et la V5 lit ceux de la V6.
+
+**Fichiers chiffrés avec la V4 :** même format, mais avec 13 000 itérations PBKDF2. Les V5 et V6 les refusent (code `2`, fichier intact) : les déchiffrer avec la V4, puis les rechiffrer avec la V6.
 
 **Fichiers chiffrés avant la V4 :** le tag était calculé autrement (H lu dans le mauvais ordre, multiplication GF(2¹²⁸) non conforme), et les plus anciennes versions n'utilisaient pas de sel PBKDF2. Ces fichiers sont aussi refusés (code `2`).
 
@@ -305,19 +328,20 @@ Le format suit la norme AES-256-GCM : avec la clé PBKDF2 (même mot de passe, m
 
 ## Performances
 
-Mesures indicatives (`gcc -O2`, Raspberry Pi 4) :
+Mesures indicatives (`gcc -O2`, Raspberry Pi 4, Linux) :
 
-| Opération | Durée |
-|-----------|-------|
-| Dérivation de clé PBKDF2 (600 000 itérations) | ≈ 2,9 s par chiffrement ou déchiffrement |
-| Chiffrement d'un fichier de 4 Mo | ≈ 5,3 s (dont 2,9 s de PBKDF2) |
-| Déchiffrement d'un fichier de 4 Mo (deux passes) | ≈ 7,0 s (dont 2,9 s de PBKDF2) |
+| Opération | V6 | V5 |
+|-----------|----|----|
+| Dérivation de clé PBKDF2 (600 000 itérations), à chaque chiffrement ou déchiffrement | ≈ 1,4 s | ≈ 2,9 s |
+| Chiffrement d'un fichier de 4 Mo | ≈ 3,8 s | ≈ 5,3 s |
+| Déchiffrement d'un fichier de 4 Mo (deux passes) | ≈ 5,5 s | ≈ 7,0 s |
+
+Le gain de la V6 vient uniquement de PBKDF2 (voir [Fonctionnement interne](#fonctionnement-interne)) : le traitement des données lui-même va à la même vitesse (≈ 2,4 s pour chiffrer 4 Mo, PBKDF2 à part).
 
 Le code privilégie la lisibilité sur la vitesse :
 
 - `AES_Encrypt_State` recalcule l'expansion de clé (60 mots) **à chaque bloc**, puis l'efface ;
-- `gf128_multiply` traite les 128 bits un par un ;
-- `AES_HMAC` rehache la clé (blocs ipad / opad) à chaque appel : PBKDF2 fait 4 compressions SHA-256 par itération au lieu de 2.
+- `gf128_multiply` traite les 128 bits un par un.
 
 ---
 
@@ -326,15 +350,21 @@ Le code privilégie la lisibilité sur la vitesse :
 **Sécurité**
 
 - Le nombre d'itérations PBKDF2 n'est pas enregistré dans le fichier : il ne peut pas être modifié sans rendre illisibles les données déjà chiffrées.
-- Les valeurs intermédiaires de PBKDF2 et de HMAC (dérivées du mot de passe) ne sont pas effacées de la mémoire. Le mot de passe lui-même reste sous la responsabilité de l'appelant.
+- PBKDF2 efface ses valeurs intermédiaires (dérivées du mot de passe), mais `AES_HMAC` et `AES_SHA256` n'effacent pas les leurs ; PBKDF2 appelle `AES_HMAC` une fois par chiffrement ou déchiffrement. Le mot de passe lui-même reste sous la responsabilité de l'appelant.
 - Pas de données associées authentifiées (AAD).
 
 **Robustesse**
 
 - Un fichier `<fichier>.tmp` déjà présent est écrasé sans avertissement.
-- Taille maximale : environ 32 Gio (compteur de blocs en `int`), et 2 Gio sur les systèmes où `long` fait 32 bits (`ftell`).
+- Taille maximale d'un fichier : un peu moins de 32 Gio (compteur de blocs en `int`), et un peu moins de 2 Gio sous Windows (`long` de 32 bits pour `ftell`). Au-delà, `AES_GCM_Encrypt_File` refuse le fichier (code `1`) sans le modifier.
+- `AES_GCM_Encrypt` (en mémoire) ne fait pas encore ce contrôle de taille : ne pas lui donner plus de 32 Gio.
 - Les fonctions internes (`padding`, `compressing`, `push`, `pop`, `mul`…) sont globales et portent des noms génériques : conflit possible avec une autre bibliothèque liée au même programme. Les déclarer `static` réglerait le problème.
-- Windows natif n'est pas pris en charge (`/dev/urandom`).
+
+**Windows** (comportement attendu, pas encore testé sur une machine Windows)
+
+- Un fichier en lecture seule est refusé (code `1`, intact) : Windows refuse de le remplacer.
+- Le résultat prend les droits d'accès du dossier, pas ceux du fichier d'origine.
+- Les chemins passent par l'API « ANSI » (`fopen`, `MoveFileExA`) : un nom de fichier contenant des caractères absents de la page de code de Windows ne peut pas être ouvert.
 
 ---
 

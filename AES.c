@@ -2,7 +2,13 @@
 #include <stdint.h> 
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>     // INT_MAX et LONG_MAX
+#ifdef _WIN32
+#include <windows.h>
+#include <bcrypt.h>
+#else
 #include <sys/stat.h>
+#endif
 #include "AES.h"
 
 typedef uint8_t word[4];
@@ -456,22 +462,33 @@ void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]){
 
 int AES_GCM_Encrypt_File(char* path,char* password){
     // GENERATION DE LA NONCE ET DU SEL
+    uint8_t nonce[12];
+    uint8_t salt[16];
+#ifdef _WIN32
+    /* Windows n'a pas de /dev/urandom : c'est BCryptGenRandom qui donne
+     * le hasard du système. Il renvoie 0 quand tout s'est bien passé. */
+    if(BCryptGenRandom(NULL, nonce, 12, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
+        return 1;
+    }
+    if(BCryptGenRandom(NULL, salt, 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
+        return 1;
+    }
+#else
     FILE *f = fopen("/dev/urandom", "rb");
     if(f == NULL){
         return 1;
     }
-    
-    uint8_t nonce[12];
+
     if(fread(nonce, sizeof(uint8_t), 12, f) != 12){
         fclose(f);
         return 1;
     }
-    uint8_t salt[16];
     if(fread(salt,sizeof(uint8_t), 16, f) != 16){
         fclose(f);
         return 1;
     }
     fclose(f);
+#endif
 
     // CREATION DE LA CLE AVEC PBKDF2
     uint8_t key[32];
@@ -489,8 +506,28 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     }
     fseek(file_in, 0, SEEK_END);
     long filesize = ftell(file_in);
+    /* ftell renvoie -1 quand il ne peut pas donner la taille. Exemple : sous
+     * Windows, un long ne fait que 32 bits, donc un fichier de 2 Go ou plus.
+     * Sans ce test, NbState vaudrait 0 : rien ne serait lu, et le fichier
+     * serait remplacé par 44 octets (sel + nonce + signature) sans les données.
+     *
+     * Trop gros : NbState et le compteur de ConterBlockGenerator sont des int
+     * (2 147 483 647 au maximum). En morceaux de 16 octets, ça fait ~32 Go.
+     * Au-delà, NbState deviendrait négatif : même perte des données.
+     *   - filesize / 16 >= INT_MAX - 2 : le - 2 parce que le compteur vaut state + 2.
+     *     On divise filesize au lieu de calculer (filesize + 15) / 16, car
+     *     le + 15 pourrait lui-même dépasser.
+     *   - filesize > LONG_MAX - 15 : c'est justement ce + 15 de NbState. Sous
+     *     Windows, filesize peut aller jusqu'à LONG_MAX = 2 147 483 647, et
+     *     + 15 dépasserait.
+     */
+    if(filesize < 0 || filesize > LONG_MAX - 15 || filesize / 16 >= INT_MAX - 2){
+        fclose(file_in);
+        uint8_tToZero(key, 32);
+        return 1;
+    }
     rewind(file_in);
-    
+
     int NbState = (filesize + 15) / 16;
 
 
@@ -515,7 +552,12 @@ int AES_GCM_Encrypt_File(char* path,char* password){
      * Sans ça, fopen crée un fichier neuf avec les droits par défaut :
      * un fichier en 600 (lisible par toi seul) devenait 664 (lisible par tous).
      * & 0777 : on garde seulement les droits rwx du propriétaire, du groupe et des autres.
+     *
+     * Sous Windows, les droits ne sont pas des rwx (chmod ne sait gérer que
+     * « lecture seule ») : ce bloc n'est compilé que sous Linux (#ifndef = « si PAS
+     * Windows »). Le .tmp, créé dans le même dossier, reçoit les droits du dossier.
      */
+#ifndef _WIN32
     struct stat infos;
     if(stat(path, &infos) != 0 || chmod(tmpPath, infos.st_mode & 0777) != 0){
         fclose(file_out);
@@ -525,6 +567,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         uint8_tToZero(key, 32);
         return 1;
     }
+#endif
     if(fwrite(salt, 1, 16, file_out) != 16){
         fclose(file_out);
         fclose(file_in);
@@ -695,7 +738,14 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     }
     fclose(file_in);
 
+#ifdef _WIN32
+    /* Sous Windows, rename refuse d'écraser un fichier qui existe déjà.
+     * MoveFileExA avec MOVEFILE_REPLACE_EXISTING fait le même travail que
+     * le rename de Linux. Attention : il renvoie 0 quand ça RATE. */
+    if(MoveFileExA(tmpPath, path, MOVEFILE_REPLACE_EXISTING) == 0){
+#else
     if(rename(tmpPath, path) != 0){
+#endif
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
@@ -848,6 +898,8 @@ int AES_GCM_Decrypt_File(char* path,char* password){
 
     // Le .tmp prend les mêmes droits que l'original (explication dans AES_GCM_Encrypt_File).
     // Ici c'est le plus important : le .tmp va contenir le texte déchiffré.
+    // Seulement sous Linux, comme dans AES_GCM_Encrypt_File.
+#ifndef _WIN32
     struct stat infos;
     if(stat(path, &infos) != 0 || chmod(tmpPath, infos.st_mode & 0777) != 0){
         fclose(file_write);
@@ -857,6 +909,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         uint8_tToZero(key, 32);
         return 1;
     }
+#endif
 
     uint8_t plaintextState[16];
     uint8_t accumulateur[16] = {0x00};
@@ -971,7 +1024,12 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         return 1;
     }
 
+#ifdef _WIN32
+    // Même chose que dans AES_GCM_Encrypt_File : 0 = échec
+    if(MoveFileExA(tmpPath, path, MOVEFILE_REPLACE_EXISTING) == 0){
+#else
     if(rename(tmpPath, path) != 0){
+#endif
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
@@ -992,22 +1050,32 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     }
 
     // GENERATION DE LA NONCE ET DU SEL
+    uint8_t nonce[12];
+    uint8_t salt[16];
+#ifdef _WIN32
+    // Même chose que dans AES_GCM_Encrypt_File : le hasard de Windows
+    if(BCryptGenRandom(NULL, nonce, 12, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
+        return 1;
+    }
+    if(BCryptGenRandom(NULL, salt, 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
+        return 1;
+    }
+#else
     FILE *f = fopen("/dev/urandom", "rb");
     if(f == NULL){
         return 1;
     }
 
-    uint8_t nonce[12];
     if(fread(nonce, sizeof(uint8_t), 12, f) != 12){
         fclose(f);
         return 1;
     }
-    uint8_t salt[16];
     if(fread(salt,sizeof(uint8_t), 16, f) != 16){
         fclose(f);
         return 1;
     }
     fclose(f);
+#endif
 
     // CREATION DE LA CLE AVEC PBKDF2
     uint8_t key[32];
@@ -1617,25 +1685,106 @@ int PBKDF2(uint8_t* dest,char* password,size_t size_password,uint8_t* salt,size_
     memcpy(mess,salt,size_salt);
     memcpy(mess+size_salt,ZeroOne,4);
 
-    // Phase 2
+    // Phase 2 : le 1er tour (avec le sel) ne change pas
     uint8_t U[32];
     if(AES_HMAC(U,(uint8_t*)password,size_password,mess,size_salt + 4) == 1){
         free(mess);
         return 1;
     }
     free(mess);
-
     memcpy(dest, U, 32);
-    uint8_t Unext[32];
-    for(size_t i=1;i<tour;i++){
-        if(AES_HMAC(Unext,(uint8_t*)password,size_password,U,32) == 1){
+
+    /* Phase 3 : le MORCEAU 1, calculé UNE SEULE FOIS
+     * Le morceau 1 (keyIn ou keyOut) ne dépend que du mot de passe :
+     * son compressing donne toujours le même H (2223a11b et 8efd7f67
+     * avec "password"). On le calcule ici et on garde le résultat
+     * dans Hin et Hout, au lieu de le refaire à chaque tour.
+     */
+
+    // Même chose que AES_HMAC (Phase 1 et 2)
+    uint8_t localKey[64] = {0};
+    if(size_password > 64){
+        if(AES_SHA256(localKey,(uint8_t*)password,size_password) == 1){
+            uint8_tToZero(U, sizeof(U));
             return 1;
         }
-        memcpy(U,Unext,32);
+    }else{
+        memcpy(localKey,password,size_password);
+    }
+    uint8_t keyIn[64];
+    uint8_t keyOut[64];
+    for(int i=0;i<64;i++){
+        keyIn[i] = localKey[i] ^ 0x36;
+        keyOut[i] = localKey[i] ^ 0x5c;
+    }
+
+    // Même chose que AES_SHA256 (H = HASH_CONST puis compressing),
+    // mais seulement sur le morceau 1. Pas de padding : keyIn fait
+    // déjà 64 octets, c'est un morceau complet.
+    uint32_t Hin[8] = HASH_CONST;
+    compressing(Hin, keyIn);
+    uint32_t Hout[8] = HASH_CONST;
+    compressing(Hout, keyOut);
+
+    /* Phase 4 : le MORCEAU 2, préparé une fois
+     * C'est le padding que AES_SHA256 ajoutait, fait à la main :
+     *   octets 0 à 31  : les 32 octets à hacher (rempli dans la boucle)
+     *   octet 32       : 0x80
+     *   octets 33 à 61 : 0 (déjà à 0 grâce au = {0})
+     *   octets 62 et 63: taille du message ENTIER en bits
+     *                    = (64 + 32) octets * 8 = 768 bits = 0x0300
+     * Le SHA intérieur et le SHA extérieur hachent tous les deux
+     * 64 + 32 octets : le même morceau 2 sert aux deux, seuls les
+     * octets 0 à 31 changent.
+     */
+    uint8_t morceau2[64] = {0};
+    morceau2[32] = 0x80;
+    morceau2[62] = 0x03;
+    morceau2[63] = 0x00;
+
+    uint32_t H[8];
+    for(size_t i=1;i<tour;i++){
+        // SHA intérieur : on repart de Hin (copie, car compressing modifie H)
+        memcpy(morceau2, U, 32);
+        memcpy(H, Hin, sizeof(H));
+        compressing(H, morceau2);
+
+        // On découpe H en 32 octets (comme AES_SHA256),
+        // directement au début du morceau 2 pour le SHA extérieur
+        for(size_t k=0;k<8;k++){
+            morceau2[4*k]     = (uint8_t)(H[k] >> 24);
+            morceau2[4*k + 1] = (uint8_t)(H[k] >> 16);
+            morceau2[4*k + 2] = (uint8_t)(H[k] >> 8);
+            morceau2[4*k + 3] = (uint8_t)(H[k]);
+        }
+
+        // SHA extérieur : on repart de Hout
+        memcpy(H, Hout, sizeof(H));
+        compressing(H, morceau2);
+
+        // Le résultat devient le nouveau U
+        for(size_t k=0;k<8;k++){
+            U[4*k]     = (uint8_t)(H[k] >> 24);
+            U[4*k + 1] = (uint8_t)(H[k] >> 16);
+            U[4*k + 2] = (uint8_t)(H[k] >> 8);
+            U[4*k + 3] = (uint8_t)(H[k]);
+        }
+
         for(size_t j=0;j<32;j++){
             dest[j] ^= U[j];
         }
     }
+
+    // Efface tout ce qui vient du mot de passe
+    // (avec Hin et Hout, on peut calculer le HMAC sans connaître le mot de passe)
+    uint8_tToZero(localKey, sizeof(localKey));
+    uint8_tToZero(keyIn, sizeof(keyIn));
+    uint8_tToZero(keyOut, sizeof(keyOut));
+    uint8_tToZero((uint8_t*)Hin, sizeof(Hin));
+    uint8_tToZero((uint8_t*)Hout, sizeof(Hout));
+    uint8_tToZero((uint8_t*)H, sizeof(H));
+    uint8_tToZero(morceau2, sizeof(morceau2));
+    uint8_tToZero(U, sizeof(U));
 
     return 0;
 }
