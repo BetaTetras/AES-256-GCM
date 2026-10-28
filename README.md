@@ -13,10 +13,10 @@ Un appel suffit pour chiffrer un fichier en place, ou un tampon en mémoire, ave
 
 - **AES-256** conforme à FIPS-197 (14 rondes, expansion de clé en 60 mots).
 - **Chiffrement authentifié AES-256-GCM** conforme à NIST SP 800-38D : chiffrement en mode compteur (CTR) et tag d'authentification de 16 octets. Les données chiffrées sont lisibles par toute autre implémentation GCM (voir [Compatibilité](#compatibilité)).
-- **Dérivation de clé PBKDF2-HMAC-SHA256** avec **600 000 itérations** (recommandation OWASP) : la clé de 32 octets est dérivée du mot de passe et d'un sel aléatoire.
+- **Dérivation de clé PBKDF2-HMAC-SHA256** avec **600 000 itérations** (recommandation OWASP) : la clé de 32 octets est dérivée du mot de passe et d'un sel aléatoire. Le nombre d'itérations est **enregistré dans le fichier** : il pourra être augmenté dans une version future sans rendre illisibles les fichiers existants.
 - **Sel et nonce aléatoires** tirés du générateur aléatoire du système (`/dev/urandom`, ou `BCryptGenRandom` sous Windows) à chaque chiffrement : chiffrer deux fois les mêmes données avec le même mot de passe donne deux résultats différents.
 - **Chiffrement de fichiers ou en mémoire** : `AES_GCM_Encrypt` / `AES_GCM_Decrypt` travaillent sur un tampon, sans rien écrire sur le disque, et produisent exactement le même format qu'un fichier chiffré.
-- **Pas de padding** : le texte chiffré a exactement la taille des données d'origine (+ 44 octets d'en-tête et de tag).
+- **Pas de padding** : le texte chiffré a exactement la taille des données d'origine (+ 49 octets d'en-tête et de tag).
 - **Fichiers traités par blocs de 16 octets** : la mémoire utilisée reste constante, quelle que soit la taille du fichier.
 - **Écriture sûre** : le résultat est écrit dans `<fichier>.tmp` puis renommé. Chaque écriture est vérifiée : en cas de mauvais mot de passe, de fichier altéré ou de disque plein, le `.tmp` est supprimé et l'original reste intact. Sous Linux, macOS et BSD, le fichier garde ses droits d'accès (un fichier en `600` reste en `600`) ; sous Windows, il prend ceux de son dossier. Un fichier trop gros, ou dont la taille ne peut pas être lue, est refusé sans être modifié.
 - **Hygiène mémoire** : la clé et ses copies (sous-clés AES) sont effacées avant chaque retour, avec une écriture `volatile` que le compilateur ne peut pas supprimer. Le tag est comparé en temps constant.
@@ -79,6 +79,7 @@ int main(int argc, char *argv[]) {
 
     if (r == 0)      puts("OK");
     else if (r == 2) puts("Mot de passe incorrect ou fichier altéré");
+    else if (r == 3) puts("Fichier chiffré avec une autre version (format inconnu)");
     else             puts("Erreur (fichier introuvable, lecture/écriture, disque plein, mémoire)");
     return r;
 }
@@ -132,8 +133,9 @@ int AES_GCM_Decrypt_File(char* path, char* password);
 | Code retour | `AES_GCM_Encrypt_File` | `AES_GCM_Decrypt_File` |
 |:-----------:|------------------------|------------------------|
 | `0` | Succès | Succès |
-| `1` | Erreur : générateur aléatoire indisponible, fichier introuvable, taille illisible ou fichier trop gros (voir [Limites connues](#limites-connues)), ouverture, lecture, écriture (disque plein), allocation, renommage. L'original est intact. | Erreur : fichier introuvable, fichier de moins de 44 octets ou trop gros, ouverture, écriture (disque plein), allocation, renommage. L'original est intact. |
+| `1` | Erreur : générateur aléatoire indisponible, fichier introuvable, taille illisible ou fichier trop gros (voir [Limites connues](#limites-connues)), ouverture, lecture, écriture (disque plein), allocation, renommage. L'original est intact. | Erreur : fichier introuvable, fichier de moins de 49 octets ou trop gros, nombre d'itérations égal à 0, ouverture, écriture (disque plein), allocation, renommage. L'original est intact. |
 | `2` | — | **Échec d'authentification** : mauvais mot de passe *ou* fichier modifié. Le fichier n'est pas touché. |
+| `3` | — | **Version inconnue** : le premier octet n'est pas `7`, par exemple un fichier chiffré avec la V6 ou une version antérieure (voir [Compatibilité](#compatibilité)). Le fichier n'est pas touché. |
 
 Un mauvais mot de passe et un fichier altéré donnent tous deux `2` : les deux cas sont indiscernables par construction.
 
@@ -149,15 +151,16 @@ int AES_GCM_Decrypt(uint8_t** dest, size_t* size_dest, uint8_t* src, size_t size
 | Paramètre | Description |
 |-----------|-------------|
 | `dest` | Adresse d'un pointeur qui doit valoir `NULL`. La fonction alloue le résultat et y met son adresse ; l'appelant le libère avec `free`. |
-| `size_dest` | Reçoit la taille du résultat : `size_src + 44` pour `AES_GCM_Encrypt`, `size_src - 44` pour `AES_GCM_Decrypt`. |
+| `size_dest` | Reçoit la taille du résultat : `size_src + 49` pour `AES_GCM_Encrypt`, `size_src - 49` pour `AES_GCM_Decrypt`. |
 | `src`, `size_src` | Données d'entrée : le texte clair (`AES_GCM_Encrypt`) ou les données chiffrées (`AES_GCM_Decrypt`). |
 | `password` | Mot de passe, chaîne C terminée par `\0`. |
 
 | Code retour | `AES_GCM_Encrypt` | `AES_GCM_Decrypt` |
 |:-----------:|-------------------|-------------------|
 | `0` | Succès | Succès |
-| `1` | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, données trop grosses (voir [Limites connues](#limites-connues)), générateur aléatoire indisponible, allocation | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, moins de 44 octets ou trop gros, allocation |
+| `1` | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, données trop grosses (voir [Limites connues](#limites-connues)), générateur aléatoire indisponible, allocation | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, moins de 49 octets ou trop gros, nombre d'itérations égal à 0, allocation |
 | `2` | — | **Échec d'authentification** : mauvais mot de passe *ou* données modifiées. `*dest` reste `NULL`. |
+| `3` | — | **Version inconnue** : le premier octet n'est pas `7`. `*dest` reste `NULL`. |
 
 - Le résultat de `AES_GCM_Encrypt` a exactement le format d'un fichier chiffré : on peut l'écrire tel quel dans un fichier et le relire avec `AES_GCM_Decrypt_File`, et inversement.
 - `AES_GCM_Decrypt` ajoute un `'\0'` après le texte (non compté dans `*size_dest`) : un texte déchiffré, du JSON par exemple, s'utilise directement comme chaîne C.
@@ -176,6 +179,7 @@ if (AES_GCM_Encrypt(&chiffre, &taille_chiffre, (uint8_t*)json, strlen(json), "mo
 int r = AES_GCM_Decrypt(&clair, &taille_clair, chiffre, taille_chiffre, "mon mot de passe");
 if (r == 0)      printf("%s\n", (char*)clair);   /* '\0' ajouté par AES_GCM_Decrypt */
 else if (r == 2) puts("Mot de passe incorrect ou données altérées");
+else if (r == 3) puts("Données chiffrées avec une autre version");
 
 free(chiffre);
 free(clair);   /* effacer clair avant s'il contient des secrets */
@@ -214,16 +218,24 @@ for (int i = 0; i < 16; i++) bloc[i] = state[i % 4][i / 4];
 
 ## Format des données chiffrées
 
-Le format est le même pour un fichier et pour un tampon en mémoire. Pour des données d'origine de **N** octets, le résultat fait **N + 44** octets :
+Le format est le même pour un fichier et pour un tampon en mémoire. Pour des données d'origine de **N** octets, le résultat fait **N + 49** octets :
+
+```
+[Version - 1 o][Nombre d'itérations - 4 o][Sel - 16 o][Nonce - 12 o][Chiffré - N o][Tag - 16 o]
+```
 
 | Position (octets) | Taille | Contenu |
 |-------------------|:------:|---------|
-| `0` – `15`        | 16 | Sel PBKDF2, aléatoire |
-| `16` – `27`       | 12 | Nonce, aléatoire |
-| `28` – `27+N`     | N  | Texte chiffré (même taille que l'original) |
-| `28+N` – `43+N`   | 16 | Tag d'authentification |
+| `0`               | 1  | Version du format : `7` |
+| `1` – `4`         | 4  | Nombre d'itérations PBKDF2, entier non signé de 32 bits, poids fort en premier (600 000 = `00 09 27 C0`) |
+| `5` – `20`        | 16 | Sel PBKDF2, aléatoire |
+| `21` – `32`       | 12 | Nonce, aléatoire |
+| `33` – `32+N`     | N  | Texte chiffré (même taille que l'original) |
+| `33+N` – `48+N`   | 16 | Tag d'authentification |
 
-Le nombre d'itérations PBKDF2 n'est **pas** enregistré dans le fichier : modifier `PBKDF2_TOURS` rend illisibles les données chiffrées auparavant (c'est le cas des fichiers de la V4, voir [Compatibilité](#compatibilité)).
+Le chiffrement écrit la valeur de `PBKDF2_TOURS` ; le déchiffrement utilise le nombre d'itérations lu dans le fichier. Augmenter `PBKDF2_TOURS` dans une version future ne rendra donc pas illisibles les fichiers déjà chiffrés.
+
+La version et le nombre d'itérations ne font pas partie du tag, mais ils ne peuvent pas être modifiés sans être détectés : une autre version est refusée (code `3`), et un autre nombre d'itérations donne une autre clé, donc un tag faux (code `2`).
 
 ---
 
@@ -231,7 +243,7 @@ Le nombre d'itérations PBKDF2 n'est **pas** enregistré dans le fichier : modif
 
 ```
 mot de passe ──┐
-               ├──►  PBKDF2-HMAC-SHA256 (600 000 itérations)  ──►  clé K (32 octets)
+               ├──►  PBKDF2-HMAC-SHA256 (itérations de l'en-tête, 600 000 au chiffrement)  ──►  clé K (32 octets)
 sel (16 o) ────┘
 
 H         = AES-256(K, 0¹²⁸)                          clé du hachage GHASH
@@ -263,7 +275,9 @@ Tag       = S ⊕ AES-256(K, nonce ‖ 00 00 00 01)
 
 | Paramètre | Valeur | Où |
 |-----------|--------|----|
-| Itérations PBKDF2 | 600 000 | `#define PBKDF2_TOURS` |
+| Version du format | 7 (premier octet de l'en-tête) | `#define VERSION` |
+| Itérations PBKDF2 au chiffrement | 600 000, écrit dans l'en-tête | `#define PBKDF2_TOURS` |
+| Itérations PBKDF2 au déchiffrement | la valeur lue dans l'en-tête (1 à 4 294 967 295) | `AES_GCM_Decrypt*` |
 | Taille du sel | 16 octets | `AES_GCM_*` |
 | Taille de la nonce | 12 octets (96 bits) | `AES_GCM_*` |
 | Taille du tag | 16 octets (128 bits) | `AES_GCM_*` |
@@ -285,33 +299,37 @@ Chaque composant a été testé contre les vecteurs de test officiels :
 | Texte chiffré GCM (flux CTR) | NIST GCM, cas de test 14 | ✅ |
 | Multiplication GF(2¹²⁸) (GHASH) | NIST GCM, cas de test 2 | ✅ |
 | Blocs compteur au-delà de 2³¹ (jusqu'à 4 294 967 295) | Comparaison avec AES-ECB (Python `cryptography`) | ✅ |
-| Fichier complet (sel, nonce, chiffré, tag) | Comparaison avec `AESGCM` (Python `cryptography`), dans les deux sens, fichiers de 0 à 70 000 octets | ✅ |
-| Données chiffrées en mémoire | Comparaison avec `AESGCM` (Python `cryptography`), dans les deux sens, de 0 à 1 000 octets | ✅ |
+| Fichier complet (en-tête, sel, nonce, chiffré, tag) | Python (`hashlib` + `AESGCM` de `cryptography`) lit l'en-tête et déchiffre les fichiers de 0 à 100 000 octets ; les fichiers fabriqués par Python, à 600 000 et à 1 000 itérations, sont déchiffrés | ✅ |
+| Données chiffrées en mémoire | Même comparaison avec Python, de 0 à 1 000 octets, à 600 000 et à 1 000 itérations | ✅ |
 
 Tests sur fichiers (aller-retour chiffrement → déchiffrement) :
 
 | Scénario | Résultat |
 |----------|:--------:|
-| Fichiers de 0, 1, 15, 16, 17, 1 000 et 70 000 octets : contenu restitué à l'identique, taille + 44 octets | ✅ |
-| Mauvais mot de passe → code `2`, fichier intact | ✅ |
-| Chaque octet d'un fichier chiffré modifié un par un → code `2` | ✅ |
-| Fichier de moins de 44 octets → code `1` | ✅ |
+| Fichiers de 0, 1, 15, 16, 17, 1 000 et 100 000 octets : contenu restitué à l'identique, taille + 49 octets, en-tête `07 00 09 27 C0` | ✅ |
+| Mauvais mot de passe → code `2`, fichier intact, pas de `.tmp` | ✅ |
+| Chaque octet d'un fichier chiffré modifié un par un : version → code `3`, tous les autres (itérations comprises) → code `2`, fichier jamais modifié | ✅ |
+| Fichier chiffré avec la V6 → code `3`, intact ; octet de version à `8` → code `3` | ✅ |
+| Nombre d'itérations à 0 → code `1`, intact | ✅ |
+| Fichier de moins de 49 octets, fichier vide, fichier introuvable → code `1` | ✅ |
 | Disque plein (simulé avec `ulimit -f`) pendant le chiffrement ou le déchiffrement → code `1`, original intact, pas de `.tmp` | ✅ |
 | Fichier en `600` → toujours `600` après chiffrement et déchiffrement | ✅ |
 | Taille illisible (`ftell` renvoie `-1`, simulé avec un tube nommé) → code `1`, rien n'est modifié | ✅ |
 | Fichier d'un octet de plus que la taille maximale (68 719 476 705 octets, fichier creux) → code `1`, intact, pas de `.tmp` ; la taille maximale (68 719 476 704 octets) est acceptée | ✅ |
-| Fichier chiffré plus gros que la taille maximale + 44 octets → code `1` au déchiffrement, intact | ✅ |
+| Fichier chiffré plus gros que la taille maximale + 49 octets → code `1` au déchiffrement, intact ; la taille maximale + 49 octets est acceptée | ✅ |
+| Dossier en lecture seule → code `1`, original intact | ✅ |
 
 Tests en mémoire :
 
 | Scénario | Résultat |
 |----------|:--------:|
-| Aller-retour de 0 à 100 octets : contenu identique, `'\0'` final, taille + 44 octets | ✅ |
+| Aller-retour de 0, 17 et 1 000 octets : contenu identique, `'\0'` final, taille + 49 octets | ✅ |
 | Mauvais mot de passe → code `2`, `*dest` reste `NULL` | ✅ |
-| Chaque octet des données chiffrées modifié un par un → code `2` | ✅ |
-| Moins de 44 octets, paramètre `NULL` ou `*dest` déjà rempli → code `1` | ✅ |
+| Octets modifiés (version, itérations, sel, nonce, chiffré, tag) : version → code `3`, les autres → code `2` | ✅ |
+| Données chiffrées avec la V6 → code `3` ; nombre d'itérations à 0 → code `1` | ✅ |
+| Moins de 49 octets, paramètre `NULL` ou `*dest` déjà rempli → code `1` | ✅ |
 | Taille annoncée plus grande que la taille maximale (avec un petit buffer) → code `1` avant toute lecture, `*dest` reste `NULL` | ✅ |
-| Données chiffrées en mémoire, écrites dans un fichier, puis relues par `AES_GCM_Decrypt_File` | ✅ |
+| Données chiffrées en mémoire, écrites dans un fichier, puis relues par `AES_GCM_Decrypt_File`, et l'inverse | ✅ |
 | Aucune copie de la clé dans la pile après `AES_GCM_Encrypt` (vérifié en `-O0` et `-O2`) | ✅ |
 
 Tous les scénarios passent sous `valgrind` sans erreur ni fuite mémoire.
@@ -320,13 +338,14 @@ Tous les scénarios passent sous `valgrind` sans erreur ni fuite mémoire.
 
 ### Compatibilité
 
-Le format suit la norme AES-256-GCM : avec la clé PBKDF2 (même mot de passe, même sel, 600 000 itérations), n'importe quelle implémentation GCM conforme peut déchiffrer les données, et inversement.
+Après l'en-tête, le format suit la norme AES-256-GCM : avec la clé PBKDF2 (même mot de passe, même sel, même nombre d'itérations, lus dans l'en-tête), n'importe quelle implémentation GCM conforme peut déchiffrer les données, et inversement.
 
-**Fichiers chiffrés avec la V5 :** même format et même dérivation de clé. La V6 lit les fichiers de la V5, et la V5 lit ceux de la V6.
+**Fichiers chiffrés avec la V5 ou la V6 :** ils n'ont pas d'en-tête (version et itérations). La V7 les refuse (code `3`, fichier intact), et la V6 refuse les fichiers de la V7 (code `2`, fichier intact). Pour les garder : les déchiffrer avec la V6, puis les rechiffrer avec la V7.
 
-**Fichiers chiffrés avec la V4 :** même format, mais avec 13 000 itérations PBKDF2. Les V5 et V6 les refusent (code `2`, fichier intact) : les déchiffrer avec la V4, puis les rechiffrer avec la V6.
+> [!NOTE]
+> Le premier octet d'un fichier V5 ou V6 est le début de son sel, donc du hasard : un fichier sur 256 commence par l'octet `7`. La V7 le lit alors comme un fichier V7, avec un nombre d'itérations tiré des octets suivants du sel (souvent plusieurs milliards) : le déchiffrement peut durer des heures avant de répondre `2`. Les déchiffrer avec la V6 évite ce cas.
 
-**Fichiers chiffrés avant la V4 :** le tag était calculé autrement (H lu dans le mauvais ordre, multiplication GF(2¹²⁸) non conforme), et les plus anciennes versions n'utilisaient pas de sel PBKDF2. Ces fichiers sont aussi refusés (code `2`).
+**Fichiers chiffrés avec la V4 ou avant :** refusés aussi (code `3`, avec le même cas d'un fichier sur 256) : les déchiffrer avec la version qui les a créés.
 
 ---
 
@@ -340,7 +359,9 @@ Mesures indicatives (`gcc -O2`, Raspberry Pi 4, Linux) :
 | Chiffrement d'un fichier de 4 Mo | ≈ 3,8 s | ≈ 5,3 s |
 | Déchiffrement d'un fichier de 4 Mo (deux passes) | ≈ 5,5 s | ≈ 7,0 s |
 
-Le gain de la V6 vient uniquement de PBKDF2 (voir [Fonctionnement interne](#fonctionnement-interne)) : le traitement des données lui-même va à la même vitesse (≈ 2,4 s pour chiffrer 4 Mo, PBKDF2 à part).
+Le gain de la V6 vient uniquement de PBKDF2 (voir [Fonctionnement interne](#fonctionnement-interne)) : le traitement des données lui-même va à la même vitesse (≈ 2,4 s pour chiffrer 4 Mo, PBKDF2 à part). La V7 ne change que l'en-tête (5 octets) : elle fait exactement les mêmes calculs que la V6.
+
+La durée de la dérivation de clé est proportionnelle au nombre d'itérations lu dans le fichier : deux fois plus d'itérations, deux fois plus de temps.
 
 Le code privilégie la lisibilité sur la vitesse :
 
@@ -353,7 +374,7 @@ Le code privilégie la lisibilité sur la vitesse :
 
 **Sécurité**
 
-- Le nombre d'itérations PBKDF2 n'est pas enregistré dans le fichier : il ne peut pas être modifié sans rendre illisibles les données déjà chiffrées.
+- Le nombre d'itérations lu dans un fichier n'est pas plafonné (choix) : un fichier modifié peut en demander jusqu'à 4 294 967 295, soit près de 3 h de calcul sur Raspberry Pi 4 avant le refus (code `2`). Rien n'est lu ni écrit pendant ce temps, et le fichier reste intact.
 - PBKDF2 efface ses valeurs intermédiaires (dérivées du mot de passe), mais `AES_HMAC` et `AES_SHA256` n'effacent pas les leurs ; PBKDF2 appelle `AES_HMAC` une fois par chiffrement ou déchiffrement. Le mot de passe lui-même reste sous la responsabilité de l'appelant.
 - Pas de données associées authentifiées (AAD).
 

@@ -60,6 +60,8 @@ static const uint8_t RCON[11] = {
 #define HASH_CONST {0x6a09e667,0xbb67ae85 ,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}
 #define PBKDF2_TOURS 600000
 
+#define VERSION 7
+
 /* GCM : taille maximale d'un message (NIST SP 800-38D), 68 719 476 704 octets (~64 Go).
  * Le compteur de ConterBlockGenerator ne fait que 4 octets (0 à 4 294 967 295) :
  *   - 0 n'est jamais utilisé, 1 sert au masque de la signature,
@@ -580,6 +582,33 @@ int AES_GCM_Encrypt_File(char* path,char* password){
             return 1;
         }
     #endif
+
+
+    // Ecriture de la version
+    uint8_t p_version = (uint8_t) VERSION;
+    if(fwrite(&p_version, 1, 1, file_out) != 1){
+        fclose(file_out);
+        fclose(file_in);
+        remove(tmpPath);
+        free(tmpPath);
+        uint8_tToZero(key, 32);
+        return 1;
+    }
+    // Ecriture du nombre de tour 
+    uint8_t nbrDeTour[4];
+    nbrDeTour[0] = ((uint32_t) PBKDF2_TOURS >> 24) & 0xff;
+    nbrDeTour[1] = ((uint32_t) PBKDF2_TOURS >> 16) & 0xff;
+    nbrDeTour[2] = ((uint32_t) PBKDF2_TOURS >> 8) & 0xff;
+    nbrDeTour[3] = ((uint32_t) PBKDF2_TOURS >> 0) & 0xff;
+    if(fwrite(nbrDeTour, 1, 4, file_out) != 4){
+        fclose(file_out);
+        fclose(file_in);
+        remove(tmpPath);
+        free(tmpPath);
+        uint8_tToZero(key, 32);
+        return 1;
+    }
+
     if(fwrite(salt, 1, 16, file_out) != 16){
         fclose(file_out);
         fclose(file_in);
@@ -784,14 +813,31 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     #endif
     rewind(fileInfo);
 
-    // 12 = nonce, 16 = salt, 16 = tag
-    long long tailleChiffre = filesize - 16 - 12 - 16;
+    // 12 = nonce, 16 = salt, 16 = tag, 1 = version, 4 = nbr de tour
+    long long tailleChiffre = filesize - 16 - 12 - 16 - 1 - 4;
     // Plus gros que GCM_TAILLE_MAX : aucun fichier chiffré valide ne peut l'être
     if(tailleChiffre < 0 || (uint64_t)tailleChiffre > GCM_TAILLE_MAX){
         fclose(fileInfo);
         return 1;
     }
     uint32_t NbState = (tailleChiffre + 15) / 16;
+
+    // RECUPERATION DE LA VERSION
+    uint8_t version;
+    fread(&version,sizeof(uint8_t),1, fileInfo);
+    if(version != VERSION){
+        fclose(fileInfo);
+        return 3;
+    }
+
+    // RECUPERATION DU NOMBRE DE TOUR
+    uint8_t octetsTour[4];
+    uint32_t nbrDeTour = 0;
+    fread(octetsTour,sizeof(uint8_t),4, fileInfo);
+    nbrDeTour = ((uint32_t) octetsTour[0] << 24)
+              | ((uint32_t) octetsTour[1] << 16)
+              | ((uint32_t) octetsTour[2] << 8)
+              | ((uint32_t) octetsTour[3] << 0);
 
     // RECUPERATION DU SEL
     uint8_t salt[16];
@@ -804,7 +850,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     // FABRICATION DE LA CLE
     uint8_t key[32];
     size_t size_password = strlen(password);
-    if(PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS) == 1){
+    if(PBKDF2(key,password,size_password,salt,16,nbrDeTour) == 1){
         fclose(fileInfo);
         uint8_tToZero(key, 32);
         return 1;
@@ -896,8 +942,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         }
     }
 
-    // 2e passage : on revient au 1er morceau (juste après le sel de 16 octets et la nonce de 12 = 28)
-    fseek(fileInfo, 28, SEEK_SET);
+    fseek(fileInfo, 33, SEEK_SET);
     char* tmpPath = calloc(strlen(path)+5,sizeof(char));
     if(tmpPath == NULL){
         fclose(fileInfo);
@@ -917,17 +962,17 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     // Le .tmp prend les mêmes droits que l'original (explication dans AES_GCM_Encrypt_File).
     // Ici c'est le plus important : le .tmp va contenir le texte déchiffré.
     // Seulement sous Linux, comme dans AES_GCM_Encrypt_File.
-#ifndef _WIN32
+    #ifndef _WIN32
     struct stat infos;
-    if(stat(path, &infos) != 0 || chmod(tmpPath, infos.st_mode & 0777) != 0){
-        fclose(file_write);
-        fclose(fileInfo);
-        remove(tmpPath);
-        free(tmpPath);
-        uint8_tToZero(key, 32);
-        return 1;
-    }
-#endif
+        if(stat(path, &infos) != 0 || chmod(tmpPath, infos.st_mode & 0777) != 0){
+            fclose(file_write);
+            fclose(fileInfo);
+            remove(tmpPath);
+            free(tmpPath);
+            uint8_tToZero(key, 32);
+            return 1;
+        }
+    #endif
 
     uint8_t plaintextState[16];
     uint8_t accumulateur[16] = {0x00};
@@ -1042,12 +1087,12 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         return 1;
     }
 
-#ifdef _WIN32
-    // Même chose que dans AES_GCM_Encrypt_File : 0 = échec
-    if(MoveFileExA(tmpPath, path, MOVEFILE_REPLACE_EXISTING) == 0){
-#else
-    if(rename(tmpPath, path) != 0){
-#endif
+    #ifdef _WIN32
+        // Même chose que dans AES_GCM_Encrypt_File : 0 = échec
+        if(MoveFileExA(tmpPath, path, MOVEFILE_REPLACE_EXISTING) == 0){
+    #else
+        if(rename(tmpPath, path) != 0){
+    #endif
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
@@ -1074,30 +1119,30 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     // GENERATION DE LA NONCE ET DU SEL
     uint8_t nonce[12];
     uint8_t salt[16];
-#ifdef _WIN32
-    // Même chose que dans AES_GCM_Encrypt_File : le hasard de Windows
-    if(BCryptGenRandom(NULL, nonce, 12, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
-        return 1;
-    }
-    if(BCryptGenRandom(NULL, salt, 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
-        return 1;
-    }
-#else
-    FILE *f = fopen("/dev/urandom", "rb");
-    if(f == NULL){
-        return 1;
-    }
+    #ifdef _WIN32
+        // Même chose que dans AES_GCM_Encrypt_File : le hasard de Windows
+        if(BCryptGenRandom(NULL, nonce, 12, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
+            return 1;
+        }
+        if(BCryptGenRandom(NULL, salt, 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0){
+            return 1;
+        }
+    #else
+        FILE *f = fopen("/dev/urandom", "rb");
+        if(f == NULL){
+            return 1;
+        }
 
-    if(fread(nonce, sizeof(uint8_t), 12, f) != 12){
+        if(fread(nonce, sizeof(uint8_t), 12, f) != 12){
+            fclose(f);
+            return 1;
+        }
+        if(fread(salt,sizeof(uint8_t), 16, f) != 16){
+            fclose(f);
+            return 1;
+        }
         fclose(f);
-        return 1;
-    }
-    if(fread(salt,sizeof(uint8_t), 16, f) != 16){
-        fclose(f);
-        return 1;
-    }
-    fclose(f);
-#endif
+    #endif
 
     // CREATION DE LA CLE AVEC PBKDF2
     uint8_t key[32];
@@ -1109,13 +1154,27 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     // LECTURE DU SOURCE
     uint32_t NbState = (size_src + 15) / 16;
-    *dest = calloc(size_src + 44,sizeof(uint8_t));
+    *dest = calloc(size_src + 49,sizeof(uint8_t));
     if((*dest) == NULL){
         uint8_tToZero(key, 32);
         return 1;
     }
 
     size_t index_write = 0;
+
+    // Ecriture de la version
+    (*dest)[index_write] = (uint8_t) VERSION;
+    index_write++;
+    // Ecriture du nombre de tour 
+    uint8_t nbrDeTour[4];
+    nbrDeTour[0] = ((uint32_t) PBKDF2_TOURS >> 24) & 0xff;
+    nbrDeTour[1] = ((uint32_t) PBKDF2_TOURS >> 16) & 0xff;
+    nbrDeTour[2] = ((uint32_t) PBKDF2_TOURS >> 8) & 0xff;
+    nbrDeTour[3] = ((uint32_t) PBKDF2_TOURS >> 0) & 0xff;
+    for(size_t i = 0;i<4;i++){
+        (*dest)[index_write] = nbrDeTour[i];
+        index_write++;
+    }
     // Ecriture du salt
     for(size_t i = 0;i<16;i++){
         (*dest)[index_write] = salt[i];
@@ -1240,11 +1299,11 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         return 1;
     }
 
-    if(size_src < 44){
+    if(size_src < 49){
         return 1;
     }
 
-    long long tailleChiffre = size_src - 16 - 12 - 16;
+    long long tailleChiffre = size_src - 16 - 12 - 16 - 1 - 4;
     // Plus gros que GCM_TAILLE_MAX : aucune donnée chiffrée valide ne peut l'être
     if(tailleChiffre < 0 || (uint64_t)tailleChiffre > GCM_TAILLE_MAX){
         return 1;
@@ -1253,6 +1312,26 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     size_t index_read = 0;
     size_t index_write = 0;
+
+    // RECUPERATION DE LA VERSION
+    int version = (uint8_t)src[index_read];
+    if(version != VERSION){
+        return 3;
+    }
+    index_read++;
+
+    // RECUPERATION DU NOMBRE DE TOUR
+    uint8_t octetsTour[4];
+    uint32_t nbrDeTour = 0;
+    for(size_t i=0;i<4;i++){
+        octetsTour[i] = src[index_read];
+        index_read++;
+    }
+    nbrDeTour = ((uint32_t) octetsTour[0] << 24)
+              | ((uint32_t) octetsTour[1] << 16)
+              | ((uint32_t) octetsTour[2] << 8)
+              | ((uint32_t) octetsTour[3] << 0);
+
 
     // RECUPERATION DU SEL
     uint8_t salt[16];
@@ -1271,7 +1350,7 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     // FABRICATION DE LA CLE
     uint8_t key[32];
     size_t size_password = strlen(password);
-    if(PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS) == 1){
+    if(PBKDF2(key,password,size_password,salt,16,nbrDeTour) == 1){
         uint8_tToZero(key, 32);
         return 1;
     }
@@ -1361,9 +1440,9 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         }
     }
 
-    index_read = 28;
+    index_read = 33;
     
-    *dest = calloc((size_src - 44) + 1,sizeof(uint8_t));
+    *dest = calloc((size_src - 49) + 1,sizeof(uint8_t));
     if((*dest) == NULL){
         uint8_tToZero(key, 32);
         return 1;
