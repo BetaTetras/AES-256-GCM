@@ -1720,6 +1720,8 @@ int AES_SHA256(uint8_t* dest, uint8_t* mess, size_t size){
         dest[4*i + 3] = (uint8_t)(H[i]);
     }
 
+    uint8_tToZero(buffer,size);
+    uint8_tToZero((uint8_t*)H,sizeof(H));
     free(buffer);
     return 0;
 }
@@ -1732,6 +1734,7 @@ int AES_HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t siz
     uint8_t localKey[64] = {0};
     if(size_key > 64){
         if(AES_SHA256(localKey,key,size_key) == 1){
+            uint8_tToZero(localKey,64);
             return 1;
         }
     }else{
@@ -1749,6 +1752,9 @@ int AES_HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t siz
     // Phase 3
     uint8_t* buffer = calloc(64 + size_mess,sizeof(uint8_t));
     if(buffer == NULL){
+        uint8_tToZero(localKey,64);
+        uint8_tToZero(keyIn,64);
+        uint8_tToZero(keyOut,64);
         return 1;
     }
     memcpy(buffer,keyIn,64);
@@ -1756,9 +1762,15 @@ int AES_HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t siz
 
     uint8_t hached[32];
     if(AES_SHA256(hached,buffer,64 + size_mess)){
+        uint8_tToZero(localKey,64);
+        uint8_tToZero(keyIn,64);
+        uint8_tToZero(keyOut,64);
+        uint8_tToZero(buffer,64 + size_mess);
+        uint8_tToZero(hached,32);
         free(buffer);
         return 1;
     }
+    uint8_tToZero(buffer,64 + size_mess);
     free(buffer);
 
     // Phase 4
@@ -1767,9 +1779,19 @@ int AES_HMAC(uint8_t* dest,uint8_t* key,size_t size_key,uint8_t* mess,size_t siz
     memcpy(bufferOut+64,hached,32);
 
     if(AES_SHA256(dest,bufferOut,96)){
+        uint8_tToZero(hached,32);
+        uint8_tToZero(localKey,64);
+        uint8_tToZero(keyIn,64);
+        uint8_tToZero(keyOut,64);
+        uint8_tToZero(bufferOut,96);
         return 1;
     }
 
+    uint8_tToZero(hached,32);
+    uint8_tToZero(localKey,64);
+    uint8_tToZero(keyIn,64);
+    uint8_tToZero(keyOut,64);
+    uint8_tToZero(bufferOut,96);
     return 0;
 }
 

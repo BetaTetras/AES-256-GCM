@@ -1,11 +1,37 @@
 # AES-256-GCM + PBKDF2 en C
 
+🇬🇧 [English version](README.en.md)
+
 Bibliothèque C de chiffrement par mot de passe, de fichiers ou de données en mémoire, écrite entièrement à la main : AES-256, mode GCM (CTR + GHASH), SHA-256, HMAC-SHA256 et PBKDF2. Elle n'utilise aucune bibliothèque externe : seulement la bibliothèque standard C et quelques fonctions du système (hasard, droits et remplacement de fichiers).
 
 Un appel suffit pour chiffrer un fichier en place, ou un tampon en mémoire, avec un mot de passe ; le déchiffrement vérifie l'intégrité des données avant de rendre quoi que ce soit.
 
 > [!WARNING]
 > **Projet pédagogique, non audité.** Le code n'a fait l'objet d'aucune revue de sécurité. Pour protéger des données réelles, utilisez une bibliothèque éprouvée comme libsodium ou OpenSSL.
+
+---
+
+## Table des matières
+
+- [Fonctionnalités](#fonctionnalités)
+- [Démarrage rapide](#démarrage-rapide)
+  - [1. L'en-tête](#1-len-tête)
+  - [2. Exemple : petit outil en ligne de commande](#2-exemple--petit-outil-en-ligne-de-commande)
+  - [3. Compiler et lancer](#3-compiler-et-lancer)
+- [API](#api)
+  - [Chiffrement de fichiers (API principale)](#chiffrement-de-fichiers-api-principale)
+  - [Chiffrement en mémoire](#chiffrement-en-mémoire)
+  - [Primitives cryptographiques](#primitives-cryptographiques)
+- [Format des données chiffrées](#format-des-données-chiffrées)
+- [Fonctionnement interne](#fonctionnement-interne)
+  - [Organisation du code](#organisation-du-code)
+  - [Paramètres](#paramètres)
+- [Conformité et tests](#conformité-et-tests)
+  - [Compatibilité](#compatibilité)
+- [Performances](#performances)
+- [Limites connues](#limites-connues)
+- [Licence](#licence)
+- [Références](#références)
 
 ---
 
@@ -19,7 +45,7 @@ Un appel suffit pour chiffrer un fichier en place, ou un tampon en mémoire, ave
 - **Pas de padding** : le texte chiffré a exactement la taille des données d'origine (+ 49 octets d'en-tête et de tag).
 - **Fichiers traités par blocs de 16 octets** : la mémoire utilisée reste constante, quelle que soit la taille du fichier.
 - **Écriture sûre** : le résultat est écrit dans `<fichier>.tmp` puis renommé. Chaque écriture est vérifiée : en cas de mauvais mot de passe, de fichier altéré ou de disque plein, le `.tmp` est supprimé et l'original reste intact. Sous Linux, macOS et BSD, le fichier garde ses droits d'accès (un fichier en `600` reste en `600`) ; sous Windows, il prend ceux de son dossier. Un fichier trop gros, ou dont la taille ne peut pas être lue, est refusé sans être modifié.
-- **Hygiène mémoire** : la clé et ses copies (sous-clés AES) sont effacées avant chaque retour, avec une écriture `volatile` que le compilateur ne peut pas supprimer. Le tag est comparé en temps constant.
+- **Hygiène mémoire** : la clé et ses copies (sous-clés AES), ainsi que les valeurs intermédiaires de PBKDF2, HMAC et SHA-256, sont effacées avant chaque retour, avec une écriture `volatile` que le compilateur ne peut pas supprimer. Les tampons alloués sont effacés avant d'être libérés. Le tag est comparé en temps constant.
 
 ---
 
@@ -331,6 +357,7 @@ Tests en mémoire :
 | Taille annoncée plus grande que la taille maximale (avec un petit buffer) → code `1` avant toute lecture, `*dest` reste `NULL` | ✅ |
 | Données chiffrées en mémoire, écrites dans un fichier, puis relues par `AES_GCM_Decrypt_File`, et l'inverse | ✅ |
 | Aucune copie de la clé dans la pile après `AES_GCM_Encrypt` (vérifié en `-O0` et `-O2`) | ✅ |
+| Après `AES_HMAC`, ni la clé XOR `ipad` ni le hachage intérieur ne restent dans la pile ou dans la mémoire libérée | ✅ |
 
 Tous les scénarios passent sous `valgrind` sans erreur ni fuite mémoire.
 
@@ -351,15 +378,16 @@ Après l'en-tête, le format suit la norme AES-256-GCM : avec la clé PBKDF2 (m�
 
 ## Performances
 
-Mesures indicatives (`gcc -O2`, Raspberry Pi 4, Linux) :
+Mesures indicatives (`gcc -O2`, Raspberry Pi 4 Model B à 1,8 GHz, Linux ; médiane de 3 mesures pour la V7) :
 
-| Opération | V6 | V5 |
-|-----------|----|----|
-| Dérivation de clé PBKDF2 (600 000 itérations), à chaque chiffrement ou déchiffrement | ≈ 1,4 s | ≈ 2,9 s |
-| Chiffrement d'un fichier de 4 Mo | ≈ 3,8 s | ≈ 5,3 s |
-| Déchiffrement d'un fichier de 4 Mo (deux passes) | ≈ 5,5 s | ≈ 7,0 s |
+| Opération | V7 | V6 | V5 |
+|-----------|----|----|----|
+| Dérivation de clé PBKDF2 (600 000 itérations), à chaque chiffrement ou déchiffrement | ≈ 1,4 s | ≈ 1,4 s | ≈ 2,9 s |
+| Chiffrement d'un fichier de 4 Mio | ≈ 3,9 s | ≈ 3,8 s | ≈ 5,3 s |
+| Déchiffrement d'un fichier de 4 Mio (deux passes) | ≈ 5,7 s | ≈ 5,5 s | ≈ 7,0 s |
+| Données seules, PBKDF2 à part | chiffrement ≈ 1,6 Mio/s, déchiffrement ≈ 0,9 Mio/s | — | — |
 
-Le gain de la V6 vient uniquement de PBKDF2 (voir [Fonctionnement interne](#fonctionnement-interne)) : le traitement des données lui-même va à la même vitesse (≈ 2,4 s pour chiffrer 4 Mo, PBKDF2 à part). La V7 ne change que l'en-tête (5 octets) : elle fait exactement les mêmes calculs que la V6.
+Le gain de la V6 vient uniquement de PBKDF2 (voir [Fonctionnement interne](#fonctionnement-interne)) : le traitement des données lui-même n'a pas changé (≈ 2,5 s pour chiffrer 4 Mio, ≈ 4,3 s pour les déchiffrer, PBKDF2 à part). La V7 ne change que l'en-tête (5 octets) et ajoute l'effacement des valeurs intermédiaires de HMAC et SHA-256 : elle fait les mêmes calculs que la V6, et les écarts de mesure restent sous 0,2 s.
 
 La durée de la dérivation de clé est proportionnelle au nombre d'itérations lu dans le fichier : deux fois plus d'itérations, deux fois plus de temps.
 
@@ -374,15 +402,15 @@ Le code privilégie la lisibilité sur la vitesse :
 
 **Sécurité**
 
-- Le nombre d'itérations lu dans un fichier n'est pas plafonné (choix) : un fichier modifié peut en demander jusqu'à 4 294 967 295, soit près de 3 h de calcul sur Raspberry Pi 4 avant le refus (code `2`). Rien n'est lu ni écrit pendant ce temps, et le fichier reste intact.
-- PBKDF2 efface ses valeurs intermédiaires (dérivées du mot de passe), mais `AES_HMAC` et `AES_SHA256` n'effacent pas les leurs ; PBKDF2 appelle `AES_HMAC` une fois par chiffrement ou déchiffrement. Le mot de passe lui-même reste sous la responsabilité de l'appelant.
+- Le nombre d'itérations lu dans un fichier n'est pas plafonné (choix) : un fichier modifié peut en demander jusqu'à 4 294 967 295, soit ≈ 2 h 45 de calcul sur Raspberry Pi 4 avant le refus (code `2`). Rien n'est lu ni écrit pendant ce temps, et le fichier reste intact.
+- PBKDF2, `AES_HMAC` et `AES_SHA256` effacent leurs valeurs intermédiaires, mais deux traces peuvent rester : les variables de travail de SHA-256 (`W` et `a` à `h` dans `compressing`) restent sur la pile, car les effacer ralentirait PBKDF2, qui appelle `compressing` 1,2 million de fois ; et une copie peut rester dans les registres du processeur après un `memcpy`, ce que le C ne permet pas d'effacer. Le mot de passe lui-même reste sous la responsabilité de l'appelant.
 - Pas de données associées authentifiées (AAD).
 
 **Robustesse**
 
 - Un fichier `<fichier>.tmp` déjà présent est écrasé sans avertissement.
 - Taille maximale des données : 68 719 476 704 octets (≈ 64 Gio), pour un fichier comme en mémoire, sous Linux comme sous Windows. C'est la limite de GCM lui-même (NIST SP 800-38D) : le compteur ne fait que 32 bits, et au-delà les mêmes masques resserviraient. Les quatre fonctions `AES_GCM_*` refusent une taille plus grande (code `1`) sans rien modifier. Aller plus loin demanderait de découper les données en plusieurs messages GCM (nouveau format de fichier).
-- Aucun fichier de cette taille n'a été chiffré en entier pendant les tests (≈ 11 h de chiffrement et ≈ 19 h de déchiffrement sur Raspberry Pi 4, par extrapolation) : les limites ont été vérifiées sur des fichiers creux, et les blocs compteur au-delà de 2³¹ comparés à Python.
+- Aucun fichier de cette taille n'a été chiffré en entier pendant les tests (≈ 11 h 30 de chiffrement et ≈ 19 h 30 de déchiffrement sur Raspberry Pi 4, par extrapolation des mesures sur 4 Mio) : les limites ont été vérifiées sur des fichiers creux, et les blocs compteur au-delà de 2³¹ comparés à Python.
 - Les fonctions internes (`padding`, `compressing`, `push`, `pop`, `mul`…) sont globales et portent des noms génériques : conflit possible avec une autre bibliothèque liée au même programme. Les déclarer `static` réglerait le problème.
 
 **Windows** (comportement attendu, pas encore testé sur une machine Windows)
