@@ -8,7 +8,7 @@
  * 0 = réussite : un simple if(AES_GCM_Encrypt_File(...)) détecte toutes les erreurs. */
 #define AES_OK                0   /* tout s'est bien passé */
 #define AES_ERR_PARAM         1   /* mauvais argument : pointeur NULL, *dest pas à NULL, PBKDF2 avec tour == 0 */
-#define AES_ERR_AUTH          2   /* tag faux : mauvais mot de passe OU données modifiées */
+#define AES_ERR_AUTH          2   /* tag faux : le mot de passe est bon, mais les données (nonce, chiffré, tag) ont été modifiées */
 #define AES_ERR_VERSION       3   /* chiffré par une autre version du programme */
 #define AES_ERR_MEMOIRE       4   /* malloc/calloc a échoué */
 #define AES_ERR_ALEA          5   /* /dev/urandom ou BCryptGenRandom a échoué */
@@ -20,6 +20,7 @@
 #define AES_ERR_DROITS       11   /* stat/chmod du .tmp a échoué (pas sous Windows) */
 #define AES_ERR_ECRITURE     12   /* fwrite/fclose a échoué (disque plein...) */
 #define AES_ERR_REMPLACEMENT 13   /* rename/MoveFileExA a échoué */
+#define AES_ERR_MDP          14   /* mauvais mot de passe (ou sel, tours ou empreinte modifiés dans l'en-tête) */
 
 /* Chiffrement de fichiers (API principale) */
 int AES_GCM_Encrypt_File(char* path, char* password);

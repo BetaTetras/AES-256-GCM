@@ -71,6 +71,8 @@ static const uint8_t RCON[11] = {
  */
 #define GCM_TAILLE_MAX ((uint64_t)(UINT32_MAX - 1) * 16)
 
+#define VERIF_MESSAGE "Say thx to Tetras"
+
 static const uint32_t K[64] = {
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -541,6 +543,15 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return code;
     }
+
+    uint8_t verif[32];
+    code = AES_HMAC(verif, key, 32, (uint8_t*)VERIF_MESSAGE, sizeof(VERIF_MESSAGE) - 1);
+    if(code != AES_OK){
+        uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
+        return code;
+    }
+
     word ExplodedKey[8];
     Explode(key, ExplodedKey);
     GenerateKey(GenratedKey, ExplodedKey);
@@ -567,7 +578,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     /* ftell renvoie -1 quand il ne peut pas donner la taille. Exemple : un
      * tube (FIFO), qui n'a pas de taille.
      * Sans ce test, NbState vaudrait 0 : rien ne serait lu, et le fichier
-     * serait remplacé par 49 octets (en-tête + signature) sans les données.
+     * serait remplacé par 81 octets (en-tête + signature) sans les données.
      *
      * seek != 0 : si fseek rate, on n'est pas allé à la fin et ftell renvoie 0.
      * Le fichier aurait l'air vide : même problème, sans que ftell le signale.
@@ -678,6 +689,15 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         return AES_ERR_ECRITURE;
     }
 
+    if(fwrite(verif, 1, 32, file_out) != 32){
+        fclose(file_out);
+        fclose(file_in);
+        remove(tmpPath);
+        free(tmpPath);
+        uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
+        return AES_ERR_ECRITURE;
+    }
 
     // Création de la clé dérivée H (AES de 16 octets à 0)
     uint8_t bufferStateH[4][4];
@@ -879,8 +899,8 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         return AES_ERR_TAILLE;
     }
 
-    // 12 = nonce, 16 = salt, 16 = tag, 1 = version, 4 = nbr de tour
-    long long tailleChiffre = filesize - 16 - 12 - 16 - 1 - 4;
+    // 12 = nonce, 16 = salt, 16 = tag, 1 = version, 4 = nbr de tour, 32 = empreinte
+    long long tailleChiffre = filesize - 16 - 12 - 16 - 1 - 4 - 32;
     // Plus gros que GCM_TAILLE_MAX : aucun fichier chiffré valide ne peut l'être
     if(tailleChiffre < 0 || (uint64_t)tailleChiffre > GCM_TAILLE_MAX){
         fclose(fileInfo);
@@ -937,6 +957,14 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         return AES_ERR_LECTURE;
     }
 
+    // RECUPERATION DE L'EMPREINTE
+    uint8_t verifFichier[32];
+    if(fread(verifFichier, sizeof(uint8_t), 32, fileInfo) != 32){
+        fclose(fileInfo);
+        return AES_ERR_LECTURE;
+    }
+
+
     // FABRICATION DE LA CLE
     uint8_t key[32];
     word GenratedKey[60];
@@ -948,6 +976,28 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         uint8_tToZero(key, 32);
         uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return code;
+    }
+
+    uint8_t verif[32];
+    code = AES_HMAC(verif, key, 32, (uint8_t*)VERIF_MESSAGE, sizeof(VERIF_MESSAGE) - 1);
+    if(code != AES_OK){
+        fclose(fileInfo);
+        uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
+        return code;
+    }
+
+    // Comparaison en temps fixe (explication dans AES_GCM_Decrypt)
+    int erreurMdp = 0;
+    for(int i = 0; i < 32; i++){
+        uint8_t difference = verif[i] ^ verifFichier[i];   // 0 si les 2 octets sont identiques
+        erreurMdp = erreurMdp | difference;                // on garde tous les 1 déjà vus
+    }
+    if(erreurMdp){
+        fclose(fileInfo);
+        uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
+        return AES_ERR_MDP;
     }
     word ExplodedKey[8];
     Explode(key, ExplodedKey);
@@ -1053,8 +1103,8 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         }
     }
 
-    // Retour au début du chiffré (juste après l'en-tête de 33 octets)
-    if(fseek(fileInfo, 33, SEEK_SET) != 0){
+    // Retour au début du chiffré (juste après l'en-tête de 65 octets)
+    if(fseek(fileInfo, 65, SEEK_SET) != 0){
         fclose(fileInfo);
         uint8_tToZero(key, 32);
         uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
@@ -1298,15 +1348,22 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return code;
     }
+    uint8_t verif[32];
+    code = AES_HMAC(verif, key, 32, (uint8_t*)VERIF_MESSAGE, sizeof(VERIF_MESSAGE) - 1);
+    if(code != AES_OK){
+        uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
+        return code;
+    }
+
     word ExplodedKey[8];
     Explode(key, ExplodedKey);
     GenerateKey(GenratedKey, ExplodedKey);
     uint8_tToZero((uint8_t*)ExplodedKey, sizeof(ExplodedKey));
 
-
     // LECTURE DU SOURCE
     uint32_t NbState = (size_src + 15) / 16;
-    *dest = calloc(size_src + 49,sizeof(uint8_t));
+    *dest = calloc(size_src + 81,sizeof(uint8_t));
     if((*dest) == NULL){
         uint8_tToZero(key, 32);
         uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
@@ -1336,6 +1393,11 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     // Ecriture de la nonce
     for(size_t i = 0;i<12;i++){
         (*dest)[index_write] = nonce[i];
+        index_write++;
+    }
+    // Ecriture de la vérification
+    for(size_t i = 0;i<32;i++){
+        (*dest)[index_write] = verif[i];
         index_write++;
     }
 
@@ -1456,11 +1518,12 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         return AES_ERR_PARAM;
     }
 
-    if(size_src < 49){
+    if(size_src < 81){
         return AES_ERR_FORMAT;
     }
 
-    long long tailleChiffre = size_src - 16 - 12 - 16 - 1 - 4;
+    // 16 = tag, 12 = nonce, 16 = sel, 1 = version, 4 = tours, 32 = empreinte
+    long long tailleChiffre = size_src - 16 - 12 - 16 - 1 - 4 - 32;
     // Plus gros que GCM_TAILLE_MAX : aucune donnée chiffrée valide ne peut l'être
     if(tailleChiffre < 0 || (uint64_t)tailleChiffre > GCM_TAILLE_MAX){
         return AES_ERR_FORMAT;
@@ -1507,6 +1570,14 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         index_read++;
     }
 
+    // RECUPERATION DE L'EMPREINTE
+    uint8_t verifFichier[32];
+    for(size_t i=0;i<32;i++){
+        verifFichier[i] = src[index_read];
+        index_read++;
+    }
+
+
     // FABRICATION DE LA CLE
     uint8_t key[32];
     word GenratedKey[60];
@@ -1518,6 +1589,40 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return code;
     }
+    uint8_t verif[32];
+    code = AES_HMAC(verif, key, 32, (uint8_t*)VERIF_MESSAGE, sizeof(VERIF_MESSAGE) - 1);
+    if(code != AES_OK){
+        uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
+        return code;
+    }
+
+    /* COMPARAISON DE L'EMPREINTE (en temps fixe)
+    * ^ (XOR) : 0 si les deux octets sont identiques, sinon les bits qui diffèrent sont à 1
+    *     10100101 ^ 10100101 = 00000000   identiques
+    *     00001111 ^ 00001011 = 00000100   différents : le bit qui change est à 1
+    *
+    * |= (OU) : erreurMdp = erreurMdp | difference
+    *     Un 1 ne redevient jamais 0 : erreurMdp garde la trace de TOUS les octets différents.
+    *     octet 0 : 00000000 | 00000000 = 00000000
+    *     octet 2 : 00000000 | 00000100 = 00000100   <- une différence
+    *     octet 3 : 00000100 | 00000000 = 00000100   <- elle reste
+    *
+    * À la fin : erreurMdp == 0 seulement si les 32 octets sont identiques.
+    * La boucle fait toujours les 32 tours (contrairement à memcmp, qui s'arrête
+    * à la première différence) : le temps ne dit rien sur le nombre d'octets bons.
+    */
+    int erreurMdp = 0;
+    for(int i = 0; i < 32; i++){
+        uint8_t difference = verif[i] ^ verifFichier[i];   // 0 si les 2 octets sont identiques
+        erreurMdp = erreurMdp | difference;                // on garde tous les 1 déjà vus
+    }
+    if(erreurMdp){
+        uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
+        return AES_ERR_MDP;
+    }
+
     word ExplodedKey[8];
     Explode(key, ExplodedKey);
     GenerateKey(GenratedKey, ExplodedKey);
@@ -1611,12 +1716,12 @@ uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         }
     }
 
-    index_read = 33;
+    index_read = 65;
     
-    *dest = calloc((size_src - 49) + 1,sizeof(uint8_t));
+    *dest = calloc((size_src - 81) + 1,sizeof(uint8_t));
     if((*dest) == NULL){
         uint8_tToZero(key, 32);
-uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_MEMOIRE;
     }
 
