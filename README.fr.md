@@ -21,6 +21,7 @@ Un appel suffit pour chiffrer un fichier en place, ou un tampon en mémoire, ave
 - [API](#api)
   - [Chiffrement de fichiers (API principale)](#chiffrement-de-fichiers-api-principale)
   - [Chiffrement en mémoire](#chiffrement-en-mémoire)
+  - [Codes de retour](#codes-de-retour)
   - [Primitives cryptographiques](#primitives-cryptographiques)
 - [Format des données chiffrées](#format-des-données-chiffrées)
 - [Fonctionnement interne](#fonctionnement-interne)
@@ -61,6 +62,23 @@ Le code tient dans un seul fichier source, `AES.c`. L'en-tête `AES.h` contient 
 
 #include <stdint.h>
 #include <stddef.h>
+
+/* Codes de retour de toutes les fonctions int ci-dessous.
+ * 0 = réussite : un simple if(AES_GCM_Encrypt_File(...)) détecte toutes les erreurs. */
+#define AES_OK                0   /* tout s'est bien passé */
+#define AES_ERR_PARAM         1   /* mauvais argument : pointeur NULL, *dest pas à NULL, PBKDF2 avec tour == 0 */
+#define AES_ERR_AUTH          2   /* tag faux : mauvais mot de passe OU données modifiées */
+#define AES_ERR_VERSION       3   /* chiffré par une autre version du programme */
+#define AES_ERR_MEMOIRE       4   /* malloc/calloc a échoué */
+#define AES_ERR_ALEA          5   /* /dev/urandom ou BCryptGenRandom a échoué */
+#define AES_ERR_OUVERTURE     6   /* impossible d'ouvrir le fichier (absent, droits) */
+#define AES_ERR_TAILLE        7   /* taille illisible (tube) ou plus grosse que GCM_TAILLE_MAX */
+#define AES_ERR_FORMAT        8   /* pas un chiffré valide : trop petit, trop gros, ou 0 tour dans l'en-tête */
+#define AES_ERR_LECTURE       9   /* fread a lu moins que prévu (ou fseek raté) */
+#define AES_ERR_CREATION     10   /* impossible de créer le .tmp (dossier en lecture seule) */
+#define AES_ERR_DROITS       11   /* stat/chmod du .tmp a échoué (pas sous Windows) */
+#define AES_ERR_ECRITURE     12   /* fwrite/fclose a échoué (disque plein...) */
+#define AES_ERR_REMPLACEMENT 13   /* rename/MoveFileExA a échoué */
 
 /* Chiffrement de fichiers (API principale) */
 int AES_GCM_Encrypt_File(char* path, char* password);
@@ -156,14 +174,7 @@ int AES_GCM_Decrypt_File(char* path, char* password);
 | `path`     | Chemin du fichier. Il est **remplacé** par sa version chiffrée (ou déchiffrée). |
 | `password` | Mot de passe, chaîne C terminée par `\0`. |
 
-| Code retour | `AES_GCM_Encrypt_File` | `AES_GCM_Decrypt_File` |
-|:-----------:|------------------------|------------------------|
-| `0` | Succès | Succès |
-| `1` | Erreur : générateur aléatoire indisponible, fichier introuvable, taille illisible ou fichier trop gros (voir [Limites connues](#limites-connues)), ouverture, lecture, écriture (disque plein), allocation, renommage. L'original est intact. | Erreur : fichier introuvable, fichier de moins de 49 octets ou trop gros, nombre d'itérations égal à 0, ouverture, écriture (disque plein), allocation, renommage. L'original est intact. |
-| `2` | — | **Échec d'authentification** : mauvais mot de passe *ou* fichier modifié. Le fichier n'est pas touché. |
-| `3` | — | **Version inconnue** : le premier octet n'est pas `7`, par exemple un fichier chiffré avec la V6 ou une version antérieure (voir [Compatibilité](#compatibilité)). Le fichier n'est pas touché. |
-
-Un mauvais mot de passe et un fichier altéré donnent tous deux `2` : les deux cas sont indiscernables par construction.
+Retour : `0` en cas de succès, sinon un code d'erreur (voir [Codes de retour](#codes-de-retour)). En cas d'erreur, le fichier d'origine est intact et aucun `.tmp` ne reste.
 
 Le déchiffrement se fait en deux passes : la première calcule et vérifie le tag sans rien écrire ; la seconde déchiffre dans `<fichier>.tmp`, revérifie le tag, puis renomme.
 
@@ -181,12 +192,7 @@ int AES_GCM_Decrypt(uint8_t** dest, size_t* size_dest, uint8_t* src, size_t size
 | `src`, `size_src` | Données d'entrée : le texte clair (`AES_GCM_Encrypt`) ou les données chiffrées (`AES_GCM_Decrypt`). |
 | `password` | Mot de passe, chaîne C terminée par `\0`. |
 
-| Code retour | `AES_GCM_Encrypt` | `AES_GCM_Decrypt` |
-|:-----------:|-------------------|-------------------|
-| `0` | Succès | Succès |
-| `1` | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, données trop grosses (voir [Limites connues](#limites-connues)), générateur aléatoire indisponible, allocation | Erreur : paramètre `NULL`, `*dest` différent de `NULL`, moins de 49 octets ou trop gros, nombre d'itérations égal à 0, allocation |
-| `2` | — | **Échec d'authentification** : mauvais mot de passe *ou* données modifiées. `*dest` reste `NULL`. |
-| `3` | — | **Version inconnue** : le premier octet n'est pas `7`. `*dest` reste `NULL`. |
+Retour : `0` en cas de succès, sinon un code d'erreur (voir [Codes de retour](#codes-de-retour)). En cas d'erreur, `*dest` reste `NULL`.
 
 - Le résultat de `AES_GCM_Encrypt` a exactement le format d'un fichier chiffré : on peut l'écrire tel quel dans un fichier et le relire avec `AES_GCM_Decrypt_File`, et inversement.
 - `AES_GCM_Decrypt` ajoute un `'\0'` après le texte (non compté dans `*size_dest`) : un texte déchiffré, du JSON par exemple, s'utilise directement comme chaîne C.
@@ -211,6 +217,39 @@ free(chiffre);
 free(clair);   /* effacer clair avant s'il contient des secrets */
 ```
 
+### Codes de retour
+
+Toutes les fonctions qui renvoient un `int` utilisent les mêmes codes, définis dans `AES.h`. `0` (`AES_OK`) veut dire succès : un simple `if (r != AES_OK)` détecte n'importe quelle erreur, et la comparaison avec les noms ci-dessous dit laquelle.
+
+| Code | Nom | Signification | Renvoyé par |
+|:----:|-----|---------------|-------------|
+| `0` | `AES_OK` | Succès | toutes |
+| `1` | `AES_ERR_PARAM` | Mauvais argument : pointeur `NULL`, `*dest` différent de `NULL`, `PBKDF2` appelé avec `tour` = 0 | `AES_GCM_Encrypt`, `AES_GCM_Decrypt`, `AES_HMAC`, `PBKDF2` |
+| `2` | `AES_ERR_AUTH` | **Échec d'authentification** : mauvais mot de passe *ou* données modifiées | les deux fonctions de déchiffrement |
+| `3` | `AES_ERR_VERSION` | **Version inconnue** : le premier octet n'est pas `7`, par exemple des données chiffrées avec la V6 ou avant (voir [Compatibilité](#compatibilité)) | les deux fonctions de déchiffrement |
+| `4` | `AES_ERR_MEMOIRE` | Allocation impossible (`calloc`) | toutes |
+| `5` | `AES_ERR_ALEA` | Générateur aléatoire indisponible (`/dev/urandom` ou `BCryptGenRandom`) | les deux fonctions de chiffrement |
+| `6` | `AES_ERR_OUVERTURE` | Fichier introuvable ou sans droit de lecture (`fopen` raté) | les deux fonctions fichier |
+| `7` | `AES_ERR_TAILLE` | Taille illisible (tube nommé, dossier) ou données plus grosses que la taille maximale (voir [Limites connues](#limites-connues)) | les deux fonctions de chiffrement ; `AES_GCM_Decrypt_File` pour une taille illisible |
+| `8` | `AES_ERR_FORMAT` | Pas des données chiffrées valides : moins de 49 octets, plus que la taille maximale + 49 octets, ou 0 itération dans l'en-tête | les deux fonctions de déchiffrement |
+| `9` | `AES_ERR_LECTURE` | Lecture interrompue (`fread` ou `fseek` raté, fichier raccourci pendant l'opération) | les deux fonctions fichier |
+| `10` | `AES_ERR_CREATION` | Impossible de créer `<fichier>.tmp` (dossier en lecture seule, par exemple) | les deux fonctions fichier |
+| `11` | `AES_ERR_DROITS` | Impossible de copier les droits d'accès sur le `.tmp` (`stat` ou `chmod` raté ; Linux, macOS, BSD seulement) | les deux fonctions fichier |
+| `12` | `AES_ERR_ECRITURE` | Écriture impossible (`fwrite` ou `fclose` raté, disque plein) | les deux fonctions fichier |
+| `13` | `AES_ERR_REMPLACEMENT` | Impossible de remplacer l'original par le `.tmp` (`rename` ou `MoveFileExA` raté) | les deux fonctions fichier |
+
+En cas d'erreur, rien n'est modifié : pour les fichiers, l'original est intact et aucun `.tmp` ne reste ; en mémoire, `*dest` reste `NULL`.
+
+Un mauvais mot de passe et des données modifiées donnent tous deux `2` : le tag est la seule vérification, et il dépend à la fois de la clé et des données. Les deux cas sont donc indiscernables par construction.
+
+```c
+int r = AES_GCM_Decrypt_File("note.txt", "mon mot de passe");
+if (r == AES_OK)                 puts("OK");
+else if (r == AES_ERR_AUTH)      puts("Mot de passe incorrect ou fichier altéré");
+else if (r == AES_ERR_OUVERTURE) puts("Fichier introuvable");
+else                             printf("Erreur %d\n", r);
+```
+
 ### Primitives cryptographiques
 
 Ces fonctions sont utilisables séparément. Le préfixe `AES_` de `AES_SHA256` et `AES_HMAC` évite le conflit de noms avec les fonctions `SHA256` et `HMAC` d'OpenSSL.
@@ -219,9 +258,9 @@ Ces fonctions sont utilisables séparément. Le préfixe `AES_` de `AES_SHA256` 
 |----------|------|--------|--------|
 | `AES_Encrypt_State(state, cle)` | Chiffre **un** bloc de 16 octets en place avec une clé de 32 octets. | `state` modifié | — |
 | `AES_Decrypt_State(state, cle)` | Déchiffre un bloc de 16 octets en place. | `state` modifié | — |
-| `AES_SHA256(dest, mess, size)` | Empreinte SHA-256 de `size` octets. | `dest` : 32 octets | `0` succès, `1` allocation |
-| `AES_HMAC(dest, key, size_key, mess, size_mess)` | HMAC-SHA256 (clé de n'importe quelle taille). | `dest` : 32 octets | `0` / `1` |
-| `PBKDF2(dest, password, size_password, salt, size_salt, tour)` | PBKDF2-HMAC-SHA256 avec `tour` itérations (≥ 1). | `dest` : **32 octets** (taille fixe) | `0` / `1` |
+| `AES_SHA256(dest, mess, size)` | Empreinte SHA-256 de `size` octets. | `dest` : 32 octets | `0`, ou `4` (allocation) |
+| `AES_HMAC(dest, key, size_key, mess, size_mess)` | HMAC-SHA256 (clé de n'importe quelle taille). | `dest` : 32 octets | `0`, `1` (`dest` à `NULL`) ou `4` (allocation) |
+| `PBKDF2(dest, password, size_password, salt, size_salt, tour)` | PBKDF2-HMAC-SHA256 avec `tour` itérations (≥ 1). | `dest` : **32 octets** (taille fixe) | `0`, `1` (`dest` à `NULL` ou `tour` = 0) ou `4` (allocation) |
 
 **Disposition d'un bloc AES.** Comme dans FIPS-197, la matrice `state[ligne][colonne]` est remplie **colonne par colonne** : l'octet `i` du bloc va dans `state[i % 4][i / 4]`.
 
@@ -336,14 +375,15 @@ Tests sur fichiers (aller-retour chiffrement → déchiffrement) :
 | Mauvais mot de passe → code `2`, fichier intact, pas de `.tmp` | ✅ |
 | Chaque octet d'un fichier chiffré modifié un par un : version → code `3`, tous les autres (itérations comprises) → code `2`, fichier jamais modifié | ✅ |
 | Fichier chiffré avec la V6 → code `3`, intact ; octet de version à `8` → code `3` | ✅ |
-| Nombre d'itérations à 0 → code `1`, intact | ✅ |
-| Fichier de moins de 49 octets, fichier vide, fichier introuvable → code `1` | ✅ |
-| Disque plein (simulé avec `ulimit -f`) pendant le chiffrement ou le déchiffrement → code `1`, original intact, pas de `.tmp` | ✅ |
+| Nombre d'itérations à 0 → code `8`, intact | ✅ |
+| Fichier de moins de 49 octets, fichier vide → code `8` ; fichier introuvable → code `6` | ✅ |
+| Disque plein (simulé avec `ulimit -f`) pendant le chiffrement ou le déchiffrement → code `12`, original intact, pas de `.tmp` | ✅ |
 | Fichier en `600` → toujours `600` après chiffrement et déchiffrement | ✅ |
-| Taille illisible (`ftell` renvoie `-1`, simulé avec un tube nommé) → code `1`, rien n'est modifié | ✅ |
-| Fichier d'un octet de plus que la taille maximale (68 719 476 705 octets, fichier creux) → code `1`, intact, pas de `.tmp` ; la taille maximale (68 719 476 704 octets) est acceptée | ✅ |
-| Fichier chiffré plus gros que la taille maximale + 49 octets → code `1` au déchiffrement, intact ; la taille maximale + 49 octets est acceptée | ✅ |
-| Dossier en lecture seule → code `1`, original intact | ✅ |
+| Taille illisible (`ftell` renvoie `-1`, simulé avec un tube nommé) ou dossier à la place d'un fichier → code `7`, rien n'est modifié | ✅ |
+| Fichier d'un octet de plus que la taille maximale (68 719 476 705 octets, fichier creux) → code `7`, intact, pas de `.tmp` ; la taille maximale (68 719 476 704 octets) est acceptée | ✅ |
+| Fichier chiffré plus gros que la taille maximale + 49 octets → code `8` au déchiffrement, intact ; la taille maximale + 49 octets est acceptée | ✅ |
+| Dossier en lecture seule → code `10`, original intact | ✅ |
+| Pannes simulées : chaque appel système (`calloc`, `fopen`, `fread`, `fwrite`, `fclose`, `fseek`, `stat`, `chmod`, `rename`) mis en échec un par un, soit 57 cas → le code attendu, original intact, pas de `.tmp` (un `fclose` raté sur un fichier seulement lu ne change pas le résultat) | ✅ |
 
 Tests en mémoire :
 
@@ -352,9 +392,10 @@ Tests en mémoire :
 | Aller-retour de 0, 17 et 1 000 octets : contenu identique, `'\0'` final, taille + 49 octets | ✅ |
 | Mauvais mot de passe → code `2`, `*dest` reste `NULL` | ✅ |
 | Octets modifiés (version, itérations, sel, nonce, chiffré, tag) : version → code `3`, les autres → code `2` | ✅ |
-| Données chiffrées avec la V6 → code `3` ; nombre d'itérations à 0 → code `1` | ✅ |
-| Moins de 49 octets, paramètre `NULL` ou `*dest` déjà rempli → code `1` | ✅ |
-| Taille annoncée plus grande que la taille maximale (avec un petit buffer) → code `1` avant toute lecture, `*dest` reste `NULL` | ✅ |
+| Données chiffrées avec la V6 → code `3` ; nombre d'itérations à 0 → code `8` | ✅ |
+| Moins de 49 octets → code `8` ; paramètre `NULL` ou `*dest` déjà rempli → code `1` | ✅ |
+| Taille annoncée plus grande que la taille maximale (avec un petit buffer) → code `7` au chiffrement, `8` au déchiffrement, avant toute lecture, `*dest` reste `NULL` | ✅ |
+| Pannes simulées : chaque `calloc` et chaque accès à `/dev/urandom` mis en échec un par un, soit 14 cas → code `4` ou `5`, `*dest` reste `NULL` | ✅ |
 | Données chiffrées en mémoire, écrites dans un fichier, puis relues par `AES_GCM_Decrypt_File`, et l'inverse | ✅ |
 | Aucune copie de la clé dans la pile après `AES_GCM_Encrypt` (vérifié en `-O0` et `-O2`) | ✅ |
 | Après `AES_HMAC`, ni la clé XOR `ipad` ni le hachage intérieur ne restent dans la pile ou dans la mémoire libérée | ✅ |
@@ -409,13 +450,13 @@ Le code privilégie la lisibilité sur la vitesse :
 **Robustesse**
 
 - Un fichier `<fichier>.tmp` déjà présent est écrasé sans avertissement.
-- Taille maximale des données : 68 719 476 704 octets (≈ 64 Gio), pour un fichier comme en mémoire, sous Linux comme sous Windows. C'est la limite de GCM lui-même (NIST SP 800-38D) : le compteur ne fait que 32 bits, et au-delà les mêmes masques resserviraient. Les quatre fonctions `AES_GCM_*` refusent une taille plus grande (code `1`) sans rien modifier. Aller plus loin demanderait de découper les données en plusieurs messages GCM (nouveau format de fichier).
+- Taille maximale des données : 68 719 476 704 octets (≈ 64 Gio), pour un fichier comme en mémoire, sous Linux comme sous Windows. C'est la limite de GCM lui-même (NIST SP 800-38D) : le compteur ne fait que 32 bits, et au-delà les mêmes masques resserviraient. Les quatre fonctions `AES_GCM_*` refusent une taille plus grande (code `7` au chiffrement, `8` au déchiffrement) sans rien modifier. Aller plus loin demanderait de découper les données en plusieurs messages GCM (nouveau format de fichier).
 - Aucun fichier de cette taille n'a été chiffré en entier pendant les tests (≈ 11 h 30 de chiffrement et ≈ 19 h 30 de déchiffrement sur Raspberry Pi 4, par extrapolation des mesures sur 4 Mio) : les limites ont été vérifiées sur des fichiers creux, et les blocs compteur au-delà de 2³¹ comparés à Python.
 - Les fonctions internes (`padding`, `compressing`, `push`, `pop`, `mul`…) sont globales et portent des noms génériques : conflit possible avec une autre bibliothèque liée au même programme. Les déclarer `static` réglerait le problème.
 
 **Windows** (comportement attendu, pas encore testé sur une machine Windows)
 
-- Un fichier en lecture seule est refusé (code `1`, intact) : Windows refuse de le remplacer.
+- Un fichier en lecture seule est refusé (code `13`, intact) : Windows refuse de le remplacer.
 - Le résultat prend les droits d'accès du dossier, pas ceux du fichier d'origine.
 - Les chemins passent par l'API « ANSI » (`fopen`, `MoveFileExA`) : un nom de fichier contenant des caractères absents de la page de code de Windows ne peut pas être ouvert.
 

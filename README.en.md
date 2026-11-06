@@ -21,6 +21,7 @@ A single call encrypts a file in place, or an in-memory buffer, with a password;
 - [API](#api)
   - [File encryption (main API)](#file-encryption-main-api)
   - [In-memory encryption](#in-memory-encryption)
+  - [Return codes](#return-codes)
   - [Cryptographic primitives](#cryptographic-primitives)
 - [Encrypted data format](#encrypted-data-format)
 - [Internals](#internals)
@@ -61,6 +62,23 @@ The code fits in a single source file, `AES.c`. The header `AES.h` contains the 
 
 #include <stdint.h>
 #include <stddef.h>
+
+/* Return codes of all the int functions below.
+ * 0 = success: a plain if(AES_GCM_Encrypt_File(...)) catches every error. */
+#define AES_OK                0   /* everything went well */
+#define AES_ERR_PARAM         1   /* bad argument: NULL pointer, *dest not NULL, PBKDF2 with tour == 0 */
+#define AES_ERR_AUTH          2   /* wrong tag: wrong password OR modified data */
+#define AES_ERR_VERSION       3   /* encrypted by another version of the program */
+#define AES_ERR_MEMOIRE       4   /* malloc/calloc failed */
+#define AES_ERR_ALEA          5   /* /dev/urandom or BCryptGenRandom failed */
+#define AES_ERR_OUVERTURE     6   /* cannot open the file (missing, permissions) */
+#define AES_ERR_TAILLE        7   /* unreadable size (pipe) or larger than GCM_TAILLE_MAX */
+#define AES_ERR_FORMAT        8   /* not valid encrypted data: too small, too large, or 0 iterations in the header */
+#define AES_ERR_LECTURE       9   /* fread read less than expected (or fseek failed) */
+#define AES_ERR_CREATION     10   /* cannot create the .tmp (read-only folder) */
+#define AES_ERR_DROITS       11   /* stat/chmod of the .tmp failed (not on Windows) */
+#define AES_ERR_ECRITURE     12   /* fwrite/fclose failed (disk full...) */
+#define AES_ERR_REMPLACEMENT 13   /* rename/MoveFileExA failed */
 
 /* File encryption (main API) */
 int AES_GCM_Encrypt_File(char* path, char* password);
@@ -156,14 +174,7 @@ int AES_GCM_Decrypt_File(char* path, char* password);
 | `path`     | Path of the file. It is **replaced** by its encrypted (or decrypted) version. |
 | `password` | Password, a C string terminated by `\0`. |
 
-| Return code | `AES_GCM_Encrypt_File` | `AES_GCM_Decrypt_File` |
-|:-----------:|------------------------|------------------------|
-| `0` | Success | Success |
-| `1` | Error: random generator unavailable, file not found, unreadable size or file too large (see [Known limitations](#known-limitations)), open, read, write (disk full), allocation, rename. The original is intact. | Error: file not found, file smaller than 49 bytes or too large, iteration count of 0, open, write (disk full), allocation, rename. The original is intact. |
-| `2` | — | **Authentication failure**: wrong password *or* modified file. The file is not touched. |
-| `3` | — | **Unknown version**: the first byte is not `7`, for example a file encrypted with V6 or an earlier version (see [Compatibility](#compatibility)). The file is not touched. |
-
-A wrong password and a tampered file both give `2`: the two cases are indistinguishable by design.
+Return: `0` on success, otherwise an error code (see [Return codes](#return-codes)). On error, the original file is intact and no `.tmp` is left behind.
 
 Decryption takes two passes: the first computes and checks the tag without writing anything; the second decrypts into `<file>.tmp`, checks the tag again, then renames.
 
@@ -181,12 +192,7 @@ int AES_GCM_Decrypt(uint8_t** dest, size_t* size_dest, uint8_t* src, size_t size
 | `src`, `size_src` | Input data: the plaintext (`AES_GCM_Encrypt`) or the encrypted data (`AES_GCM_Decrypt`). |
 | `password` | Password, a C string terminated by `\0`. |
 
-| Return code | `AES_GCM_Encrypt` | `AES_GCM_Decrypt` |
-|:-----------:|-------------------|-------------------|
-| `0` | Success | Success |
-| `1` | Error: `NULL` parameter, `*dest` not `NULL`, data too large (see [Known limitations](#known-limitations)), random generator unavailable, allocation | Error: `NULL` parameter, `*dest` not `NULL`, smaller than 49 bytes or too large, iteration count of 0, allocation |
-| `2` | — | **Authentication failure**: wrong password *or* modified data. `*dest` stays `NULL`. |
-| `3` | — | **Unknown version**: the first byte is not `7`. `*dest` stays `NULL`. |
+Return: `0` on success, otherwise an error code (see [Return codes](#return-codes)). On error, `*dest` stays `NULL`.
 
 - The result of `AES_GCM_Encrypt` has exactly the format of an encrypted file: it can be written as is to a file and read back with `AES_GCM_Decrypt_File`, and vice versa.
 - `AES_GCM_Decrypt` adds a `'\0'` after the text (not counted in `*size_dest`): decrypted text, JSON for example, can be used directly as a C string.
@@ -211,6 +217,41 @@ free(cipher);
 free(plain);   /* erase plain first if it contains secrets */
 ```
 
+### Return codes
+
+All the functions that return an `int` use the same codes, defined in `AES.h`. `0` (`AES_OK`) means success: a plain `if (r != AES_OK)` catches any error, and comparing with the names below tells which one.
+
+The names are in French, like the rest of the code: `MEMOIRE` = memory, `ALEA` = randomness, `OUVERTURE` = opening, `TAILLE` = size, `LECTURE` = reading, `DROITS` = permissions, `ECRITURE` = writing.
+
+| Code | Name | Meaning | Returned by |
+|:----:|------|---------|-------------|
+| `0` | `AES_OK` | Success | all |
+| `1` | `AES_ERR_PARAM` | Bad argument: `NULL` pointer, `*dest` not `NULL`, `PBKDF2` called with `tour` = 0 | `AES_GCM_Encrypt`, `AES_GCM_Decrypt`, `AES_HMAC`, `PBKDF2` |
+| `2` | `AES_ERR_AUTH` | **Authentication failure**: wrong password *or* modified data | both decryption functions |
+| `3` | `AES_ERR_VERSION` | **Unknown version**: the first byte is not `7`, for example data encrypted with V6 or earlier (see [Compatibility](#compatibility)) | both decryption functions |
+| `4` | `AES_ERR_MEMOIRE` | Allocation failed (`calloc`) | all |
+| `5` | `AES_ERR_ALEA` | Random generator unavailable (`/dev/urandom` or `BCryptGenRandom`) | both encryption functions |
+| `6` | `AES_ERR_OUVERTURE` | File not found or not readable (`fopen` failed) | both file functions |
+| `7` | `AES_ERR_TAILLE` | Unreadable size (named pipe, folder) or data larger than the maximum size (see [Known limitations](#known-limitations)) | both encryption functions; `AES_GCM_Decrypt_File` for an unreadable size |
+| `8` | `AES_ERR_FORMAT` | Not valid encrypted data: fewer than 49 bytes, more than the maximum size + 49 bytes, or 0 iterations in the header | both decryption functions |
+| `9` | `AES_ERR_LECTURE` | Read interrupted (`fread` or `fseek` failed, file shortened during the operation) | both file functions |
+| `10` | `AES_ERR_CREATION` | Cannot create `<file>.tmp` (read-only folder, for example) | both file functions |
+| `11` | `AES_ERR_DROITS` | Cannot copy the access rights to the `.tmp` (`stat` or `chmod` failed; Linux, macOS, BSD only) | both file functions |
+| `12` | `AES_ERR_ECRITURE` | Write failed (`fwrite` or `fclose` failed, disk full) | both file functions |
+| `13` | `AES_ERR_REMPLACEMENT` | Cannot replace the original with the `.tmp` (`rename` or `MoveFileExA` failed) | both file functions |
+
+On error, nothing is modified: for files, the original is intact and no `.tmp` is left behind; in memory, `*dest` stays `NULL`.
+
+A wrong password and modified data both give `2`: the tag is the only check, and it depends on both the key and the data. The two cases are therefore indistinguishable by design.
+
+```c
+int r = AES_GCM_Decrypt_File("note.txt", "my password");
+if (r == AES_OK)                 puts("OK");
+else if (r == AES_ERR_AUTH)      puts("Wrong password or tampered file");
+else if (r == AES_ERR_OUVERTURE) puts("File not found");
+else                             printf("Error %d\n", r);
+```
+
 ### Cryptographic primitives
 
 These functions can be used on their own. The `AES_` prefix of `AES_SHA256` and `AES_HMAC` avoids a name clash with OpenSSL's `SHA256` and `HMAC` functions.
@@ -219,9 +260,9 @@ These functions can be used on their own. The `AES_` prefix of `AES_SHA256` and 
 |----------|------|--------|--------|
 | `AES_Encrypt_State(state, cle)` | Encrypts **one** 16-byte block in place with a 32-byte key. | `state` modified | — |
 | `AES_Decrypt_State(state, cle)` | Decrypts a 16-byte block in place. | `state` modified | — |
-| `AES_SHA256(dest, mess, size)` | SHA-256 digest of `size` bytes. | `dest`: 32 bytes | `0` success, `1` allocation |
-| `AES_HMAC(dest, key, size_key, mess, size_mess)` | HMAC-SHA256 (key of any size). | `dest`: 32 bytes | `0` / `1` |
-| `PBKDF2(dest, password, size_password, salt, size_salt, tour)` | PBKDF2-HMAC-SHA256 with `tour` iterations (≥ 1). | `dest`: **32 bytes** (fixed size) | `0` / `1` |
+| `AES_SHA256(dest, mess, size)` | SHA-256 digest of `size` bytes. | `dest`: 32 bytes | `0`, or `4` (allocation) |
+| `AES_HMAC(dest, key, size_key, mess, size_mess)` | HMAC-SHA256 (key of any size). | `dest`: 32 bytes | `0`, `1` (`dest` is `NULL`) or `4` (allocation) |
+| `PBKDF2(dest, password, size_password, salt, size_salt, tour)` | PBKDF2-HMAC-SHA256 with `tour` iterations (≥ 1). | `dest`: **32 bytes** (fixed size) | `0`, `1` (`dest` is `NULL` or `tour` = 0) or `4` (allocation) |
 
 **Layout of an AES block.** As in FIPS-197, the `state[row][column]` matrix is filled **column by column**: byte `i` of the block goes into `state[i % 4][i / 4]`.
 
@@ -336,14 +377,15 @@ File tests (encryption → decryption round trip):
 | Wrong password → code `2`, file intact, no `.tmp` | ✅ |
 | Each byte of an encrypted file modified one at a time: version → code `3`, all others (iteration count included) → code `2`, file never modified | ✅ |
 | File encrypted with V6 → code `3`, intact; version byte set to `8` → code `3` | ✅ |
-| Iteration count of 0 → code `1`, intact | ✅ |
-| File smaller than 49 bytes, empty file, missing file → code `1` | ✅ |
-| Full disk (simulated with `ulimit -f`) during encryption or decryption → code `1`, original intact, no `.tmp` | ✅ |
+| Iteration count of 0 → code `8`, intact | ✅ |
+| File smaller than 49 bytes, empty file → code `8`; missing file → code `6` | ✅ |
+| Full disk (simulated with `ulimit -f`) during encryption or decryption → code `12`, original intact, no `.tmp` | ✅ |
 | File in mode `600` → still `600` after encryption and decryption | ✅ |
-| Unreadable size (`ftell` returns `-1`, simulated with a named pipe) → code `1`, nothing is modified | ✅ |
-| File one byte larger than the maximum size (68,719,476,705 bytes, sparse file) → code `1`, intact, no `.tmp`; the maximum size (68,719,476,704 bytes) is accepted | ✅ |
-| Encrypted file larger than the maximum size + 49 bytes → code `1` on decryption, intact; the maximum size + 49 bytes is accepted | ✅ |
-| Read-only folder → code `1`, original intact | ✅ |
+| Unreadable size (`ftell` returns `-1`, simulated with a named pipe) or a folder instead of a file → code `7`, nothing is modified | ✅ |
+| File one byte larger than the maximum size (68,719,476,705 bytes, sparse file) → code `7`, intact, no `.tmp`; the maximum size (68,719,476,704 bytes) is accepted | ✅ |
+| Encrypted file larger than the maximum size + 49 bytes → code `8` on decryption, intact; the maximum size + 49 bytes is accepted | ✅ |
+| Read-only folder → code `10`, original intact | ✅ |
+| Simulated failures: each system call (`calloc`, `fopen`, `fread`, `fwrite`, `fclose`, `fseek`, `stat`, `chmod`, `rename`) made to fail one at a time, 57 cases → the expected code, original intact, no `.tmp` (a failed `fclose` on a file that was only read does not change the result) | ✅ |
 
 In-memory tests:
 
@@ -352,9 +394,10 @@ In-memory tests:
 | Round trip of 0, 17 and 1,000 bytes: identical content, trailing `'\0'`, size + 49 bytes | ✅ |
 | Wrong password → code `2`, `*dest` stays `NULL` | ✅ |
 | Modified bytes (version, iteration count, salt, nonce, ciphertext, tag): version → code `3`, the others → code `2` | ✅ |
-| Data encrypted with V6 → code `3`; iteration count of 0 → code `1` | ✅ |
-| Smaller than 49 bytes, `NULL` parameter or `*dest` already set → code `1` | ✅ |
-| Declared size larger than the maximum size (with a small buffer) → code `1` before any read, `*dest` stays `NULL` | ✅ |
+| Data encrypted with V6 → code `3`; iteration count of 0 → code `8` | ✅ |
+| Smaller than 49 bytes → code `8`; `NULL` parameter or `*dest` already set → code `1` | ✅ |
+| Declared size larger than the maximum size (with a small buffer) → code `7` on encryption, `8` on decryption, before any read, `*dest` stays `NULL` | ✅ |
+| Simulated failures: each `calloc` and each access to `/dev/urandom` made to fail one at a time, 14 cases → code `4` or `5`, `*dest` stays `NULL` | ✅ |
 | Data encrypted in memory, written to a file, then read back by `AES_GCM_Decrypt_File`, and vice versa | ✅ |
 | No copy of the key on the stack after `AES_GCM_Encrypt` (checked at `-O0` and `-O2`) | ✅ |
 | After `AES_HMAC`, neither the key XOR `ipad` nor the inner hash remains on the stack or in freed memory | ✅ |
@@ -408,13 +451,13 @@ The code favours readability over speed:
 **Robustness**
 
 - An existing `<file>.tmp` is overwritten without warning.
-- Maximum data size: 68,719,476,704 bytes (≈ 64 GiB), for a file as well as in memory, on Linux as well as on Windows. This is the limit of GCM itself (NIST SP 800-38D): the counter is only 32 bits, and beyond that the same masks would be reused. The four `AES_GCM_*` functions refuse a larger size (code `1`) without modifying anything. Going further would require splitting the data into several GCM messages (a new file format).
+- Maximum data size: 68,719,476,704 bytes (≈ 64 GiB), for a file as well as in memory, on Linux as well as on Windows. This is the limit of GCM itself (NIST SP 800-38D): the counter is only 32 bits, and beyond that the same masks would be reused. The four `AES_GCM_*` functions refuse a larger size (code `7` on encryption, `8` on decryption) without modifying anything. Going further would require splitting the data into several GCM messages (a new file format).
 - No file of this size has been encrypted in full during the tests (≈ 11 h 30 of encryption and ≈ 19 h 30 of decryption on a Raspberry Pi 4, extrapolated from the 4 MiB measurements): the limits were checked on sparse files, and the counter blocks beyond 2³¹ compared with Python.
 - The internal functions (`padding`, `compressing`, `push`, `pop`, `mul`…) are global and have generic names: possible clash with another library linked into the same program. Declaring them `static` would solve the problem.
 
 **Windows** (expected behaviour, not yet tested on a Windows machine)
 
-- A read-only file is refused (code `1`, intact): Windows refuses to replace it.
+- A read-only file is refused (code `13`, intact): Windows refuses to replace it.
 - The result gets the permissions of the folder, not those of the original file.
 - Paths go through the "ANSI" API (`fopen`, `MoveFileExA`): a file name containing characters missing from the Windows code page cannot be opened.
 

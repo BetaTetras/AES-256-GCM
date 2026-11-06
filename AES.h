@@ -4,6 +4,23 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Codes de retour de toutes les fonctions int ci-dessous.
+ * 0 = réussite : un simple if(AES_GCM_Encrypt_File(...)) détecte toutes les erreurs. */
+#define AES_OK                0   /* tout s'est bien passé */
+#define AES_ERR_PARAM         1   /* mauvais argument : pointeur NULL, *dest pas à NULL, PBKDF2 avec tour == 0 */
+#define AES_ERR_AUTH          2   /* tag faux : mauvais mot de passe OU données modifiées */
+#define AES_ERR_VERSION       3   /* chiffré par une autre version du programme */
+#define AES_ERR_MEMOIRE       4   /* malloc/calloc a échoué */
+#define AES_ERR_ALEA          5   /* /dev/urandom ou BCryptGenRandom a échoué */
+#define AES_ERR_OUVERTURE     6   /* impossible d'ouvrir le fichier (absent, droits) */
+#define AES_ERR_TAILLE        7   /* taille illisible (tube) ou plus grosse que GCM_TAILLE_MAX */
+#define AES_ERR_FORMAT        8   /* pas un chiffré valide : trop petit, trop gros, ou 0 tour dans l'en-tête */
+#define AES_ERR_LECTURE       9   /* fread a lu moins que prévu (ou fseek raté) */
+#define AES_ERR_CREATION     10   /* impossible de créer le .tmp (dossier en lecture seule) */
+#define AES_ERR_DROITS       11   /* stat/chmod du .tmp a échoué (pas sous Windows) */
+#define AES_ERR_ECRITURE     12   /* fwrite/fclose a échoué (disque plein...) */
+#define AES_ERR_REMPLACEMENT 13   /* rename/MoveFileExA a échoué */
+
 /* Chiffrement de fichiers (API principale) */
 int AES_GCM_Encrypt_File(char* path, char* password);
 int AES_GCM_Decrypt_File(char* path, char* password);
