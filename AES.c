@@ -102,6 +102,7 @@ void SubWord(uint8_t ligne[4]);
 void Explode(const uint8_t cle[32],word w[8]);
 void GenerateKey(word finaleW[60],word initialW[8]);
 
+void AES_Encrypt_Rondes(uint8_t state[4][4], word GenratedKey[60]);
 void AES_Encrypt_State(uint8_t state[4][4], uint8_t const cle[32]);
 void AES_Decrypt_State(uint8_t state[4][4], uint8_t const cle[32]);
 
@@ -334,11 +335,13 @@ void GenerateKey(word finaleW[60],word initialW[8]){
 
 //////////////////////////////////////////////////////////
 
-void AES_Encrypt_State(uint8_t state[4][4], uint8_t const cle[32]){
-    word ExplodedKey[8];
-    Explode(cle,ExplodedKey);
-    word GenratedKey[60];
-    GenerateKey(GenratedKey,ExplodedKey);
+/* Les 14 rondes d'AES-256 avec une clé DÉJÀ étendue (les 60 mots de GenerateKey).
+ * Pas d'expansion ni d'effacement ici : c'est l'appelant qui fabrique
+ * GenratedKey une seule fois, s'en sert pour tous ses blocs, puis l'efface.
+ * C'est ce que font les fonctions GCM : la clé est la même pour tout le fichier,
+ * refaire l'expansion à chaque bloc de 16 octets coûtait 28 % du temps d'AES.
+ */
+void AES_Encrypt_Rondes(uint8_t state[4][4], word GenratedKey[60]){
     addRoundKey(state, GenratedKey);
     for(int i=1;i<=13;i++){
         SubBytes(state);
@@ -349,6 +352,20 @@ void AES_Encrypt_State(uint8_t state[4][4], uint8_t const cle[32]){
     SubBytes(state);
     ShiftRows(state);
     addRoundKey(state, GenratedKey + 56);
+}
+
+/* Version publique (AES.h) : prend la clé de 32 octets et fait elle-même
+ * l'expansion, puis l'efface. Pratique pour chiffrer un bloc seul ; pour
+ * beaucoup de blocs avec la même clé, AES_Encrypt_Rondes évite de refaire
+ * l'expansion à chaque fois.
+ */
+void AES_Encrypt_State(uint8_t state[4][4], uint8_t const cle[32]){
+    word ExplodedKey[8];
+    Explode(cle,ExplodedKey);
+    word GenratedKey[60];
+    GenerateKey(GenratedKey,ExplodedKey);
+
+    AES_Encrypt_Rondes(state, GenratedKey);
 
     // Efface les copies de la clé (GenratedKey commence par la clé)
     uint8_tToZero((uint8_t*)ExplodedKey, sizeof(ExplodedKey));
@@ -513,6 +530,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
 
     // CREATION DE LA CLE AVEC PBKDF2
     uint8_t key[32];
+    word GenratedKey[60];
     size_t size_password = strlen(password);
     /* On garde le code de PBKDF2 (AES_ERR_MEMOIRE ou AES_ERR_PARAM) et on le
      * renvoie tel quel : l'appelant sait ce qui a raté, au lieu d'un code général.
@@ -520,13 +538,19 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     int code = PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS);
     if(code != AES_OK){
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return code;
     }
+    word ExplodedKey[8];
+    Explode(key, ExplodedKey);
+    GenerateKey(GenratedKey, ExplodedKey);
+    uint8_tToZero((uint8_t*)ExplodedKey, sizeof(ExplodedKey));
 
     // LECTURE DU FICHIER BRUT (sans padding)
     FILE* file_in = fopen(path, "rb");
     if(!file_in){
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_OUVERTURE;
     }
     #ifdef _WIN32
@@ -556,6 +580,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     if(seek != 0 || filesize < 0 || (uint64_t)filesize > GCM_TAILLE_MAX){
         fclose(file_in);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_TAILLE;
     }
     rewind(file_in);
@@ -569,6 +594,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     if(tmpPath == NULL){
         fclose(file_in);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_MEMOIRE;
     }
     memcpy(tmpPath,path,strlen(path));
@@ -578,6 +604,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         free(tmpPath);
         fclose(file_in);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_CREATION;
     }
 
@@ -598,6 +625,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
             remove(tmpPath);
             free(tmpPath);
             uint8_tToZero(key, 32);
+            uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
             return AES_ERR_DROITS;
         }
     #endif
@@ -611,6 +639,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_ECRITURE;
     }
     // Ecriture du nombre de tour 
@@ -625,6 +654,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_ECRITURE;
     }
 
@@ -634,6 +664,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_ECRITURE;
     }
 
@@ -643,6 +674,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_ECRITURE;
     }
 
@@ -650,7 +682,8 @@ int AES_GCM_Encrypt_File(char* path,char* password){
     // Création de la clé dérivée H (AES de 16 octets à 0)
     uint8_t bufferStateH[4][4];
     memset(bufferStateH, 0, 16);
-    AES_Encrypt_State(bufferStateH, key);
+     
+    AES_Encrypt_Rondes(bufferStateH, GenratedKey);
 
     // La sortie d'AES se lit colonne par colonne, comme le ciphertext.
     // (un memcpy la lirait ligne par ligne : H serait dans le désordre)
@@ -685,13 +718,15 @@ int AES_GCM_Encrypt_File(char* path,char* password){
             remove(tmpPath);
             free(tmpPath);
             uint8_tToZero(key, 32);
+            uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
             return AES_ERR_LECTURE;
         }
 
         // Chiffrer en CTR
         uint8_t CompteurBlockState[4][4];
         ConterBlockGenerator(CompteurBlockState, nonce, state + 2);
-        AES_Encrypt_State(CompteurBlockState, key);
+
+        AES_Encrypt_Rondes(CompteurBlockState, GenratedKey);
 
         // Création du ciphertext
         uint8_t ciphertextState[16] = {0};
@@ -719,6 +754,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
             remove(tmpPath);
             free(tmpPath);
             uint8_tToZero(key, 32);
+            uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
             return AES_ERR_ECRITURE;
         }
     }
@@ -767,7 +803,8 @@ int AES_GCM_Encrypt_File(char* path,char* password){
      */
     uint8_t masqueTag[4][4];
     ConterBlockGenerator(masqueTag, nonce, 1);
-    AES_Encrypt_State(masqueTag, key);
+
+    AES_Encrypt_Rondes(masqueTag, GenratedKey);
 
     // Le masque est une matrice rangée colonne par colonne :
     // on la lit dans le même ordre que pour le ciphertext
@@ -785,6 +822,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_ECRITURE;
     }
 
@@ -794,6 +832,7 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_ECRITURE;
     }
     fclose(file_in);
@@ -809,10 +848,12 @@ int AES_GCM_Encrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_REMPLACEMENT;
     }
     free(tmpPath);
     uint8_tToZero(key, 32);
+uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
     return AES_OK;
 }
 
@@ -898,19 +939,26 @@ int AES_GCM_Decrypt_File(char* path,char* password){
 
     // FABRICATION DE LA CLE
     uint8_t key[32];
+    word GenratedKey[60];
     size_t size_password = strlen(password);
     // Code de PBKDF2 renvoyé tel quel (explication dans AES_GCM_Encrypt_File)
     int code = PBKDF2(key,password,size_password,salt,16,nbrDeTour);
     if(code != AES_OK){
         fclose(fileInfo);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return code;
     }
+    word ExplodedKey[8];
+    Explode(key, ExplodedKey);
+    GenerateKey(GenratedKey, ExplodedKey);
+    uint8_tToZero((uint8_t*)ExplodedKey, sizeof(ExplodedKey));
 
     // Création de la clé dérivée H (AES de 16 octets à 0)
     uint8_t bufferStateH[4][4];
     memset(bufferStateH, 0, 16);
-    AES_Encrypt_State(bufferStateH, key);
+
+    AES_Encrypt_Rondes(bufferStateH, GenratedKey);
 
     // La sortie d'AES se lit colonne par colonne, comme le ciphertext.
     // (un memcpy la lirait ligne par ligne : H serait dans le désordre)
@@ -944,6 +992,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
             if(fread(ciphertextState, 1, taille, fileInfo) != taille){
                 fclose(fileInfo);
                 uint8_tToZero(key, 32);
+                uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
                 return AES_ERR_LECTURE;
             }
 
@@ -972,7 +1021,8 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         // MASQUE N°1
         uint8_t masqueTag[4][4];
         ConterBlockGenerator(masqueTag, nonce, 1);
-        AES_Encrypt_State(masqueTag, key);
+
+        AES_Encrypt_Rondes(masqueTag, GenratedKey);
 
         int index = 0;
         for(int colonne = 0; colonne < 4; colonne++){
@@ -988,6 +1038,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         if(fread(tag, 1, 16, fileInfo) != 16){
             fclose(fileInfo);
             uint8_tToZero(key, 32);
+            uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
             return AES_ERR_LECTURE;
         }
         for(int i = 0; i < 16; i++){
@@ -997,6 +1048,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         if(error){
             fclose(fileInfo);
             uint8_tToZero(key, 32);
+            uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
             return AES_ERR_AUTH;
         }
     }
@@ -1005,12 +1057,14 @@ int AES_GCM_Decrypt_File(char* path,char* password){
     if(fseek(fileInfo, 33, SEEK_SET) != 0){
         fclose(fileInfo);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_LECTURE;
     }
     char* tmpPath = calloc(strlen(path)+5,sizeof(char));
     if(tmpPath == NULL){
         fclose(fileInfo);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_MEMOIRE;
     }
     memcpy(tmpPath,path,strlen(path));
@@ -1020,6 +1074,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         fclose(fileInfo);
         free(tmpPath);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_CREATION;
     }
 
@@ -1034,6 +1089,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
             remove(tmpPath);
             free(tmpPath);
             uint8_tToZero(key, 32);
+            uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
             return AES_ERR_DROITS;
         }
     #endif
@@ -1054,6 +1110,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
             remove(tmpPath);
             free(tmpPath);
             uint8_tToZero(key, 32);
+            uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
             return AES_ERR_LECTURE;
         }
 
@@ -1068,7 +1125,8 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         // Dechiffrement en CTR
         uint8_t CompteurBlockState[4][4];
         ConterBlockGenerator(CompteurBlockState, nonce, state + 2);
-        AES_Encrypt_State(CompteurBlockState, key);
+
+        AES_Encrypt_Rondes(CompteurBlockState, GenratedKey);
 
         // Récupération du plaintext
         int index = 0;
@@ -1089,6 +1147,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
             remove(tmpPath);
             free(tmpPath);
             uint8_tToZero(key, 32);
+            uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
             return AES_ERR_ECRITURE;
         }
     }
@@ -1120,7 +1179,8 @@ int AES_GCM_Decrypt_File(char* path,char* password){
      */
     uint8_t masqueTag[4][4];
     ConterBlockGenerator(masqueTag, nonce, 1);
-    AES_Encrypt_State(masqueTag, key);
+    
+    AES_Encrypt_Rondes(masqueTag, GenratedKey);
 
     int index = 0;
     for(int colonne = 0; colonne < 4; colonne++){
@@ -1139,6 +1199,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_LECTURE;
     }
 
@@ -1153,6 +1214,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_AUTH;  // Authentification échouée
     }
 
@@ -1162,6 +1224,7 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_ECRITURE;
     }
 
@@ -1174,10 +1237,12 @@ int AES_GCM_Decrypt_File(char* path,char* password){
         remove(tmpPath);
         free(tmpPath);
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_REMPLACEMENT;
     }
     free(tmpPath);
     uint8_tToZero(key, 32);
+    uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
     return AES_OK;
 }
 
@@ -1224,19 +1289,27 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     // CREATION DE LA CLE AVEC PBKDF2
     uint8_t key[32];
+    word GenratedKey[60];
     size_t size_password = strlen(password);
     // Code de PBKDF2 renvoyé tel quel (explication dans AES_GCM_Encrypt_File)
     int code = PBKDF2(key,password,size_password,salt,16,PBKDF2_TOURS);
     if(code != AES_OK){
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return code;
     }
+    word ExplodedKey[8];
+    Explode(key, ExplodedKey);
+    GenerateKey(GenratedKey, ExplodedKey);
+    uint8_tToZero((uint8_t*)ExplodedKey, sizeof(ExplodedKey));
+
 
     // LECTURE DU SOURCE
     uint32_t NbState = (size_src + 15) / 16;
     *dest = calloc(size_src + 49,sizeof(uint8_t));
     if((*dest) == NULL){
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_MEMOIRE;
     }
 
@@ -1269,7 +1342,8 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     // Création de la clé dérivée H (AES de 16 octets à 0)
     uint8_t bufferStateH[4][4];
     memset(bufferStateH, 0, 16);
-    AES_Encrypt_State(bufferStateH, key);
+
+    AES_Encrypt_Rondes(bufferStateH, GenratedKey);
 
     // La sortie d'AES se lit colonne par colonne, comme le ciphertext.
     // (un memcpy la lirait ligne par ligne : H serait dans le désordre)
@@ -1301,7 +1375,8 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         // Chiffrer en CTR
         uint8_t CompteurBlockState[4][4];
         ConterBlockGenerator(CompteurBlockState, nonce, state + 2);
-        AES_Encrypt_State(CompteurBlockState, key);
+
+        AES_Encrypt_Rondes(CompteurBlockState, GenratedKey);
 
         // Création du ciphertext
         uint8_t ciphertextState[16] = {0};
@@ -1345,7 +1420,8 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     uint8_t masqueTag[4][4];
     ConterBlockGenerator(masqueTag, nonce, 1);
-    AES_Encrypt_State(masqueTag, key);
+
+    AES_Encrypt_Rondes(masqueTag, GenratedKey);
 
     // Le masque est une matrice rangée colonne par colonne :
     // on la lit dans le même ordre que pour le ciphertext
@@ -1365,6 +1441,7 @@ int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     *size_dest = index_write;
 
     uint8_tToZero(key, 32);
+uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
     return AES_OK;
 }
 
@@ -1432,18 +1509,25 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
     // FABRICATION DE LA CLE
     uint8_t key[32];
+    word GenratedKey[60];
     size_t size_password = strlen(password);
     // Code de PBKDF2 renvoyé tel quel (explication dans AES_GCM_Encrypt_File)
     int code = PBKDF2(key,password,size_password,salt,16,nbrDeTour);
     if(code != AES_OK){
         uint8_tToZero(key, 32);
+        uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return code;
     }
+    word ExplodedKey[8];
+    Explode(key, ExplodedKey);
+    GenerateKey(GenratedKey, ExplodedKey);
+    uint8_tToZero((uint8_t*)ExplodedKey, sizeof(ExplodedKey));
 
     // Création de la clé dérivée H (AES de 16 octets à 0)
     uint8_t bufferStateH[4][4];
     memset(bufferStateH, 0, 16);
-    AES_Encrypt_State(bufferStateH, key);
+
+    AES_Encrypt_Rondes(bufferStateH, GenratedKey);
 
     // La sortie d'AES se lit colonne par colonne, comme le ciphertext.
     // (un memcpy la lirait ligne par ligne : H serait dans le désordre)
@@ -1497,7 +1581,8 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         // MASQUE N°1
         uint8_t masqueTag[4][4];
         ConterBlockGenerator(masqueTag, nonce, 1);
-        AES_Encrypt_State(masqueTag, key);
+
+        AES_Encrypt_Rondes(masqueTag, GenratedKey);
 
         int index = 0;
         for(int colonne = 0; colonne < 4; colonne++){
@@ -1521,6 +1606,7 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
 
         if(error){
             uint8_tToZero(key, 32);
+uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
             return AES_ERR_AUTH;
         }
     }
@@ -1530,6 +1616,7 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
     *dest = calloc((size_src - 49) + 1,sizeof(uint8_t));
     if((*dest) == NULL){
         uint8_tToZero(key, 32);
+uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_MEMOIRE;
     }
 
@@ -1559,7 +1646,8 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         // Dechiffrement en CTR
         uint8_t CompteurBlockState[4][4];
         ConterBlockGenerator(CompteurBlockState, nonce, state + 2);
-        AES_Encrypt_State(CompteurBlockState, key);
+
+        AES_Encrypt_Rondes(CompteurBlockState, GenratedKey);
 
         // Récupération du plaintext
         int index = 0;
@@ -1595,7 +1683,8 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
      */
     uint8_t masqueTag[4][4];
     ConterBlockGenerator(masqueTag, nonce, 1);
-    AES_Encrypt_State(masqueTag, key);
+
+    AES_Encrypt_Rondes(masqueTag, GenratedKey);
 
     int index = 0;
     for(int colonne = 0; colonne < 4; colonne++){
@@ -1622,12 +1711,14 @@ int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_sr
         free(*dest);
         *dest = NULL;
         uint8_tToZero(key, 32);
+uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
         return AES_ERR_AUTH;  // Authentification échouée
     }
 
     *size_dest = index_write;
 
     uint8_tToZero(key, 32);
+uint8_tToZero((uint8_t*)GenratedKey, sizeof(GenratedKey));
     return AES_OK;
 }
 
