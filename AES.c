@@ -121,6 +121,8 @@ int PBKDF2(uint8_t* dest,char* password,size_t size_password,uint8_t* salt,size_
 
 void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],uint32_t compteur);
 void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]);
+uint64_t uint8TOuint64(const uint8_t octets[8]);
+void uint64TOuint8(uint8_t octets[8],const uint64_t nombre);
 
 int AES_GCM_Encrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_src,char* password);
 int AES_GCM_Decrypt(uint8_t** dest,size_t* size_dest,uint8_t* src,size_t size_src,char* password);
@@ -420,52 +422,62 @@ void ConterBlockGenerator(uint8_t state[4][4], uint8_t nonce[12],uint32_t compte
 }
 
 void gf128_multiply(uint8_t res[16],const uint8_t a[16],const uint8_t b[16]){
-    // On def res a 0 sur ses 16 octet
-    memset(res,0x00,16);
-    // On crée un copy par ce que a est une const
-    uint8_t a_CPY[16];
-    // On copy a dans a_CPY
-    memcpy(a_CPY, a, 16);
+    // 1. On charge uint_8 a[16] et uint_8 b[16] dans des uint_64 pout eviter des boucle
+    uint64_t ah = uint8TOuint64(a);
+    uint64_t al = uint8TOuint64(a + 8);
 
-    // Sur chaque bit (16*8 = 128)
-    for(int i = 0; i < 128;i++){
-        // Pour extraire le bit numéro i du tableau b de 16 octets.
-        int bit = (b[i / 8] >> (7 - (i % 8))) & 1;
+    uint64_t bh = uint8TOuint64(b);
+    uint64_t bl = uint8TOuint64(b + 8);
+
+    // 2. on défini rh et rl (r = res)
+    uint64_t rh = 0;
+    uint64_t rl = 0;
+
+    // 3. La boucle de la mort
+    for(int i=0;i<128;i++){
+        // a. Lire le bit n°i de b
+        int bit;
+        if(i<64){
+            bit = (bh >> (63 - i)) & 1;
+        }else{
+            bit = (bl >> (127 - i)) & 1;
+        }
+
+        // b. Si le bit vaut 1, ajouter a au résultat
         if(bit){
-            for(int j=0; j<16;j++){
-                res[j] ^= a_CPY[j];
-            }
+            rh ^= ah;
+            rl ^= al;
         }
 
-        // Least Significant Bit : le bit qui va "sortir" à droite
-        uint8_t lsb = a_CPY[15] & 1;
+        // c. Lire le bit qui va sortir, avant de décaler
+        uint64_t lsb = al & 1;
 
-        /* En GCM les bits sont rangés à l'envers : le bit n°0 est le bit de
-         * GAUCHE de l'octet 0. Multiplier par x revient donc à décaler d'un
-         * bit vers la DROITE sur TOUT les octets confondus :
-         *   Octet0    Octet1   ...  Octet15
-         * [10000001][00000000]...[00001101]
-         * [01000000][10000000]...[00000110]   le 1 de droite de l'Octet15 sort
-         * Le 1 de droite de l'Octet0 passe à gauche de l'Octet1 (extra).
-        */
-        int extra = 0;
-        uint8_t buffer;
-        for(int j=0;j<16;j++){
-            buffer = a_CPY[j];
-            a_CPY[j] = a_CPY[j] >> 1;
-            if(extra){
-                a_CPY[j] = a_CPY[j] | 0x80;
-            }
-            extra = buffer & 1;
+        // d. Décaler a d'un bit vers la droite
+        al = (al >> 1) | (ah << 63);
+        ah = ah >> 1;
+
+        // e. Si un bit est sorti, le replier
+        if(lsb){
+            ah ^= ((uint64_t)0xE1 << 56);
         }
-        /* Si un bit est sorti, on le replie : x^128 = x^7 + x^2 + x + 1,
-         * ce qui s'écrit 0xE1 (11100001 = bits 0, 1, 2 et 7) dans le
-         * PREMIER octet.
-        */
-        if(lsb == 1){
-            a_CPY[0] ^= 0xE1;
-        }
-    
+    }
+    uint64TOuint8(res,rh);
+    uint64TOuint8(res+8,rl);
+    return;
+}
+
+uint64_t uint8TOuint64(const uint8_t octets[8]){
+    uint64_t nombre = 0;
+    for(int i=0;i<8;i++){
+        nombre = (nombre << 8) | octets[i];
+    }
+
+    return nombre;
+}
+
+void uint64TOuint8(uint8_t octets[8],const uint64_t nombre){
+    for(int i = 0; i < 8; i++){
+        octets[i] = (nombre >> (56 - 8 * i)) & 0xff;
     }
 }
 
